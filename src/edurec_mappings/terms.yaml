@@ -1,0 +1,10 @@
+# Blank --term searches every term listed here, in this order.
+terms:
+  - '2510'
+  - '2520'
+  - '2530'
+  - '2540'
+  - '2610'
+  - '2620'
+  - '2630'
+  - '2640'

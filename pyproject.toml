@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edurec-mappings"
+version = "0.1.0"
+description = "Read-only extraction of NUS EduRec course mapping approval requests to YAML"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4>=4.12,<5",
+    "PyYAML>=6,<7",
+    "playwright>=1.40,<2",
+    "pypdf>=4,<7",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6", "mypy>=1.10", "pytest>=8", "types-PyYAML"]
+
+[project.scripts]
+edurec-mappings = "edurec_mappings.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+edurec_mappings = ["terms.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N", "RUF", "PL", "C4"]
+ignore = ["PLR0913", "PLR2004", "PLR0912", "PLR0915"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR0913", "PLC1901"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
