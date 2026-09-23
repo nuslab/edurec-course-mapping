@@ -33,6 +33,7 @@ def namespace(**overrides: object) -> argparse.Namespace:
         "rows": None,
         "terms": ["2620"],
         "scrape_urls": False,
+        "proxy": "",
         "store": "store",
         "request_ids": [],
         "verdicts": [],
@@ -144,7 +145,7 @@ class RunTests(unittest.TestCase):
             "EduRec",
             "export",
             "playwright_fetcher",
-            "playwright_renderer",
+            "process_renderer",
             "scrape",
             "Store",
             "Reviewer",
@@ -306,6 +307,17 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(out, "Syllabus\nSyllabus\nWeek 1\n")
         make.assert_called_once_with(browser.new_context.return_value, 90000, 2000)
         browser.close.assert_called_once()
+
+    def test_fetch_html_writes_the_rendered_page(self) -> None:
+        html = "<html><title>Syllabus</title><body><p>Woche 1: Überblick</p></body></html>"
+        with (
+            mock.patch.object(cli, "sync_playwright"),
+            mock.patch.object(cli, "playwright_renderer", return_value=lambda url: html.encode()),
+        ):
+            stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+            with mock.patch("sys.stdout", stdout):
+                cli.run_fetch(cli.parse_args(["fetch", "--html", "https://example.com"]))
+            self.assertEqual(stdout.buffer.getvalue().decode(), html)
 
 
 class ForgetDownloadsTests(unittest.TestCase):

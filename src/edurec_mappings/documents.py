@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
+import os
 import re
+import signal
+import subprocess
+import sys
+import time
+import zipfile
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from xml.etree import ElementTree
 
+import pypdfium2
 from bs4 import BeautifulSoup
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from pypdf import PdfReader
 
 from .models import Fetched, LinkedDocument, Request
 from .store import DOCUMENTS
@@ -27,6 +35,17 @@ MIN_HTML_TEXT = 1000
 """HTML pages with less extracted text than this are treated as script-rendered shells."""
 RENDER_SETTLE_MS = 5000
 """How long a rendered page is given after network idle for scripts to fill the DOM."""
+RENDER_MARGIN_S = 30
+"""Time a render process gets beyond its page timeout and settle to start and exit."""
+MAX_FOLDER_FILES = 20
+RETRY_STATUSES = frozenset({429, 502, 503, 504})
+RETRY_DELAY_S = 10
+"""Rate limits and overloaded gateways get one more try after this pause."""
+BLOCK_PAGE_TEXT = 3000
+"""Pages shorter than this whose title names a sign-in or bot check are not the document."""
+BLOCK_TITLE = re.compile(
+    r"sign[- ]?in|log[- ]?in|anmeld|request rejected|content blocked|access denied", re.I
+)
 
 Fetcher = Callable[[str], Fetched]
 Renderer = Callable[[str], bytes]
@@ -57,7 +76,10 @@ def find_urls(request: Request) -> list[str]:
 
 
 DRIVE_FILE = re.compile(r"^/file/d/([\w-]+)")
-GOOGLE_DOC = re.compile(r"^/(document|presentation|spreadsheets)/d/([\w-]+)")
+DRIVE_FOLDER = re.compile(r"^/drive/(?:u/\d+/)?folders/([\w-]+)")
+# `/d/e/<id>/pub` is a published copy, readable as HTML but without an export endpoint.
+GOOGLE_DOC = re.compile(r"^/(document|presentation|spreadsheets)/d/(?!e/)([\w-]+)")
+WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 DOC_EXPORT = {"document": "txt", "presentation": "pdf", "spreadsheets": "csv"}
 
 
@@ -82,9 +104,58 @@ def direct_url(url: str) -> str:
 
 
 def pdf_text(data: bytes) -> tuple[str, int]:
-    reader = PdfReader(io.BytesIO(data))
-    pages = [(page.extract_text() or "").strip() for page in reader.pages]
-    return "\n\n".join(p for p in pages if p), len(reader.pages)
+    document = pypdfium2.PdfDocument(data)
+    try:
+        pages = [page.get_textpage().get_text_range().strip() for page in document]
+        return "\n\n".join(p for p in pages if p), len(pages)
+    finally:
+        document.close()
+
+
+def docx_text(data: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        root = ElementTree.fromstring(archive.read("word/document.xml"))
+    paragraphs = ("".join(t.text or "" for t in p.iter(f"{WORD}t")) for p in root.iter(f"{WORD}p"))
+    return "\n".join(p.strip() for p in paragraphs if p.strip())
+
+
+BundleFile = tuple[str, str | None, bytes | Exception]
+"""A file's name, content type and bytes, or why it could not be downloaded."""
+
+
+def bundle_text(files: list[BundleFile]) -> str:
+    """The text of each file under a `=== name ===` heading; unreadable files say why.
+
+    Empty when no file had text, so a folder of images is recorded as empty.
+    """
+    parts: list[str] = []
+    readable = False
+    for name, content_type, data in sorted(files, key=lambda file: file[0]):
+        try:
+            if isinstance(data, Exception):
+                raise data
+            text = extract_text(name, content_type, data, bundles=False).text or ""
+        except Exception as error:
+            text = f"[Not read: {reason(error)}]"
+        else:
+            readable = readable or bool(text.strip())
+            text = text or "[No extractable text]"
+        parts.append(f"=== {name} ===\n{text}")
+    return "\n\n".join(parts) if readable else ""
+
+
+def zip_files(data: bytes) -> list[BundleFile]:
+    files: list[BundleFile] = []
+    total = 0
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            total += member.file_size
+            if total > MAX_BYTES:
+                raise ValueError(f"Archive exceeds {MAX_BYTES} bytes uncompressed")
+            files.append((member.filename, None, archive.read(member)))
+    return files
 
 
 def html_text(data: bytes, encoding: str | None = None) -> tuple[str, str | None]:
@@ -96,8 +167,13 @@ def html_text(data: bytes, encoding: str | None = None) -> tuple[str, str | None
     return "\n".join(line for line in lines if line), title
 
 
-def extract_text(url: str, content_type: str | None, data: bytes) -> LinkedDocument:
-    """The document's text, kind, title and page count; the status is left to the caller."""
+def extract_text(
+    url: str, content_type: str | None, data: bytes, bundles: bool = True
+) -> LinkedDocument:
+    """The document's text, kind, title and page count; the status is left to the caller.
+
+    A zip archive is read file by file unless `bundles` is false, which stops nesting.
+    """
     header = content_type or ""
     kind = header.split(";")[0].strip().lower()
     charset_match = re.search(r"charset=([\w-]+)", header, re.I)
@@ -106,6 +182,13 @@ def extract_text(url: str, content_type: str | None, data: bytes) -> LinkedDocum
     if kind == "application/pdf" or data.startswith(b"%PDF-"):
         text, pages = pdf_text(data)
         return LinkedDocument(url, kind="pdf", text=text, pages=pages)
+    if data.startswith(b"PK"):
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            is_docx = "word/document.xml" in archive.namelist()
+        if is_docx:
+            return LinkedDocument(url, kind="docx", text=docx_text(data))
+        if bundles:
+            return LinkedDocument(url, kind="zip", text=bundle_text(zip_files(data)))
     if kind in ("text/html", "application/xhtml+xml") or head.startswith(
         (b"<!doctype html", b"<html")
     ):
@@ -129,7 +212,9 @@ def rendered_text(target: str, render: Renderer, extracted: LinkedDocument) -> L
     A render failure keeps the shell, so the record never gets worse than the plain fetch.
     """
     shell = extracted.text or ""
-    if extracted.kind != "html" or len(shell) >= MIN_HTML_TEXT:
+    # A `#/` route is chosen by scripts; the plain fetch drops the fragment and gets the index.
+    routed = "#/" in target
+    if extracted.kind != "html" or (len(shell) >= MIN_HTML_TEXT and not routed):
         return extracted
     try:
         text, title = html_text(render(target))
@@ -140,25 +225,91 @@ def rendered_text(target: str, render: Renderer, extracted: LinkedDocument) -> L
     return replace(extracted, text=text, title=title or extracted.title)
 
 
+def reason(error: Exception) -> str:
+    return str(error).splitlines()[0] if str(error) else type(error).__name__
+
+
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def clean(text: str) -> str:
+    """Normalise line ends, drop control characters and repair UTF-16 surrogates.
+
+    PDF text layers map bullets and ligatures to control characters, and can split
+    characters outside the Basic Multilingual Plane into surrogate halves, which cannot be
+    encoded as UTF-8; pairs are joined and lone halves replaced.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = CONTROL.sub("", text)
+    return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
+def download(url: str, fetch: Fetcher) -> tuple[str | None, bytes]:
+    status, content_type, data = fetch(url)
+    if status in RETRY_STATUSES:
+        time.sleep(RETRY_DELAY_S)
+        status, content_type, data = fetch(url)
+    if status >= 400:
+        raise ValueError(f"HTTP {status}")
+    if len(data) > MAX_BYTES:
+        raise ValueError(f"Document exceeds {MAX_BYTES} bytes")
+    return content_type, data
+
+
+def drive_folder(url: str, folder_id: str, fetch: Fetcher) -> LinkedDocument:
+    """Read the files at the top of a shared Drive folder; subfolders are not followed.
+
+    The folder page lists its files only after scripts run, but the embeddable view is
+    plain HTML linking each file, which then downloads like a shared file link.
+    """
+    _, listing = download(f"https://drive.google.com/embeddedfolderview?id={folder_id}", fetch)
+    soup = BeautifulSoup(listing, "html.parser")
+    files: list[BundleFile] = []
+    for entry in soup.select(".flip-entry")[:MAX_FOLDER_FILES]:
+        link, name = entry.select_one("a[href]"), entry.select_one(".flip-entry-title")
+        if link is None or name is None:
+            continue
+        href = str(link["href"])
+        if DRIVE_FOLDER.match(urlsplit(href).path):
+            continue
+        content_type: str | None = None
+        data: bytes | Exception
+        try:
+            content_type, data = download(direct_url(href), fetch)
+        except Exception as error:
+            data = error
+        files.append((name.get_text(strip=True), content_type, data))
+    if not files:
+        raise ValueError("Folder lists no files")
+    title = soup.title.string.strip() if soup.title and soup.title.string else None
+    return LinkedDocument(url, kind="folder", text=bundle_text(files), title=title)
+
+
 def fetch_document(url: str, fetch: Fetcher, render: Renderer | None = None) -> LinkedDocument:
     """Fetch one URL; every failure is recorded in the result rather than raised."""
     target = direct_url(url)
+    parts = urlsplit(url)
+    folder = DRIVE_FOLDER.match(parts.path) if parts.netloc.lower() == "drive.google.com" else None
     try:
-        status, content_type, data = fetch(target)
-        if status >= 400:
-            raise ValueError(f"HTTP {status}")
-        if len(data) > MAX_BYTES:
-            raise ValueError(f"Document exceeds {MAX_BYTES} bytes")
-        record = extract_text(url, content_type, data)
-        if render is not None:
-            record = rendered_text(target, render, record)
+        if folder:
+            record = drive_folder(url, folder.group(1), fetch)
+        else:
+            record = extract_text(url, *download(target, fetch))
+            if render is not None:
+                record = rendered_text(target, render, record)
+        text = clean(record.text or "")
+        if (
+            record.kind == "html"
+            and len(text) < BLOCK_PAGE_TEXT
+            and BLOCK_TITLE.search(record.title or "")
+        ):
+            raise ValueError(f"Sign-in or block page: {record.title}")
+        record = replace(record, text=text, bytes=len(text.encode()))
     except Exception as error:
-        why = str(error).splitlines()[0] if str(error) else type(error).__name__
-        return LinkedDocument(url, error=why)
-    record.bytes = len((record.text or "").encode())
+        return LinkedDocument(url, error=reason(error))
     if not record.text:
         return replace(record, status="empty", error="No extractable text", text=None)
-    if record.bytes > MAX_TEXT_BYTES:
+    if (record.bytes or 0) > MAX_TEXT_BYTES:
         too_large = f"Extracted text exceeds {MAX_TEXT_BYTES} bytes"
         return replace(record, status="too_large", error=too_large, text=None)
     return replace(record, status="fetched", path=f"{DOCUMENTS}/{document_name(url)}")
@@ -216,5 +367,42 @@ def playwright_renderer(
             return page.content().encode()
         finally:
             page.close()
+
+    return render
+
+
+def run_with_deadline(command: list[str], deadline_s: float) -> bytes:
+    """Run a command and return its stdout; kill it and its children at the deadline."""
+    with subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True
+    ) as process:
+        try:
+            output, _ = process.communicate(timeout=deadline_s)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise TimeoutError(f"Render exceeded {deadline_s:.0f} s") from None
+    if process.returncode:
+        raise RuntimeError(f"Render exited with status {process.returncode}")
+    return output
+
+
+def process_renderer(
+    proxy: str | None, timeout: float, settle_ms: float = RENDER_SETTLE_MS
+) -> Renderer:
+    """Render each URL with `fetch --html` in its own headless browser, killed at a deadline.
+
+    A page that keeps its scripts busy can block Playwright calls that take no timeout,
+    such as reading the DOM, and would stall the whole export in the export's own browser.
+    The render browser is not signed in, which public catalogue pages do not need.
+    """
+    deadline_s = (timeout + settle_ms) / 1000 + RENDER_MARGIN_S
+    options = ["--timeout", str(math.ceil(timeout / 1000)), "--settle", str(settle_ms / 1000)]
+    if proxy:
+        options += ["--proxy", proxy]
+
+    def render(url: str) -> bytes:
+        command = [sys.executable, "-m", "edurec_mappings", "fetch", "--html", *options, url]
+        return run_with_deadline(command, deadline_s)
 
     return render

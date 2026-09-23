@@ -30,7 +30,7 @@ from .browser import (
     Reviewer,
     mapping_frame,
 )
-from .documents import html_text, playwright_fetcher, playwright_renderer, scrape
+from .documents import html_text, playwright_fetcher, playwright_renderer, process_renderer, scrape
 from .export import export
 from .models import TERM_PATTERN, Export, Verdict
 from .review import review
@@ -143,6 +143,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--proxy", default="")
     add("--timeout", type=int, default=90)
     add("--settle", type=float, default=8, help="Seconds to wait after network idle")
+    add("--html", action="store_true", help="Write the rendered HTML instead of its text")
 
     args = parser.parse_args(argv)
     if "timeout" in args:
@@ -162,15 +163,19 @@ def run_pending(args: argparse.Namespace) -> None:
 
 
 def run_fetch(args: argparse.Namespace) -> None:
-    """Render one URL in a fresh headless browser and write its text to stdout."""
+    """Render one URL in a fresh headless browser and write its text, or HTML, to stdout."""
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(proxy={"server": args.proxy} if args.proxy else None)
         try:
             context = browser.new_context()
             render = playwright_renderer(context, args.timeout_ms, args.settle * 1000)
-            text, title = html_text(render(args.url))
+            html = render(args.url)
         finally:
             browser.close()
+    if args.html:
+        sys.stdout.buffer.write(html)
+        return
+    text, title = html_text(html)
     if title:
         print(title)
     print(text)
@@ -328,7 +333,7 @@ def collect(context: BrowserContext, args: argparse.Namespace, data: Export) -> 
     print(f"{data.status}: {len(data.requests)} requests collected", flush=True)
     if args.scrape_urls:
         fetch = playwright_fetcher(context, args.timeout_ms)
-        scrape(data.requests, fetch, playwright_renderer(context, args.timeout_ms))
+        scrape(data.requests, fetch, process_renderer(args.proxy or None, args.timeout_ms))
 
 
 def persist(data: Export, args: argparse.Namespace) -> None:

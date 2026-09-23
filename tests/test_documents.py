@@ -1,11 +1,24 @@
 import io
+import sys
+import time
 import unittest
+import zipfile
 from typing import NoReturn
+from unittest.mock import patch
 
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from edurec_mappings.documents import direct_url, document_name, fetch_documents, find_urls
+from edurec_mappings.documents import (
+    clean,
+    direct_url,
+    document_name,
+    fetch_document,
+    fetch_documents,
+    find_urls,
+    process_renderer,
+    run_with_deadline,
+)
 from edurec_mappings.models import Fetched, LinkedDocument
 from edurec_mappings.parse import detail
 from tests.test_parse import fixture
@@ -31,6 +44,30 @@ def pdf_bytes(text: str) -> bytes:
     buffer = io.BytesIO()
     writer.write(buffer)
     return buffer.getvalue()
+
+
+def zip_bytes(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def docx_bytes(*paragraphs: str) -> bytes:
+    body = "".join(f"<w:p><w:r><w:t>{p}</w:t></w:r></w:p>" for p in paragraphs)
+    xml = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}</w:body></w:document>"
+    )
+    return zip_bytes({"word/document.xml": xml.encode()})
+
+
+def folder_entry(href: str, title: str) -> str:
+    return (
+        f'<div class="flip-entry"><div class="flip-entry-info"><a href="{href}">'
+        f'<div class="flip-entry-title">{title}</div></a></div></div>'
+    )
 
 
 class DocumentTests(unittest.TestCase):
@@ -59,6 +96,8 @@ class DocumentTests(unittest.TestCase):
             direct_url("https://docs.google.com/presentation/d/abc/edit#slide=1"),
             "https://docs.google.com/presentation/d/abc/export?format=pdf",
         )
+        published = "https://docs.google.com/document/d/e/2PACX-1vT/pub"
+        self.assertEqual(direct_url(published), published)
         self.assertEqual(
             direct_url("https://drive.google.com/drive/folders/xyz"),
             "https://drive.google.com/drive/folders/xyz",
@@ -144,3 +183,119 @@ class DocumentTests(unittest.TestCase):
         broken = docs["broken-shell"]
         self.assertEqual((broken.status, broken.text), ("fetched", "Loading"))
         self.assertIn("Week one outline", docs["full"].text or "")
+
+    def test_pdf_text_is_cleaned(self) -> None:
+        self.assertEqual(clean("\ud835\udc65 and \ud835"), "\U0001d465 and \ufffd")
+        self.assertEqual(clean("\x1f Data\r\nQuality\rWeek\t1\n"), " Data\nQuality\nWeek\t1\n")
+
+    def test_docx_and_zip_files_are_read_file_by_file(self) -> None:
+        archive = zip_bytes(
+            {
+                "b/outline.docx": docx_bytes("Week 1", "Search"),
+                "a/scan.png": b"\x89PNG",
+                "c/slides.pdf": pdf_bytes("Planning"),
+            }
+        )
+        responses = {
+            "https://example.org/a.docx": Fetched(200, None, docx_bytes("Week 1", "Search")),
+            "https://example.org/all.zip": Fetched(200, "application/zip", archive),
+            "https://example.org/pics.zip": Fetched(
+                200, "application/zip", zip_bytes({"x.png": b"\x89PNG"})
+            ),
+        }
+        docs = {url: fetch_document(url, responses.__getitem__) for url in responses}
+        docx = docs["https://example.org/a.docx"]
+        self.assertEqual((docx.status, docx.kind, docx.text), ("fetched", "docx", "Week 1\nSearch"))
+        bundle = docs["https://example.org/all.zip"]
+        self.assertEqual((bundle.status, bundle.kind), ("fetched", "zip"))
+        text = bundle.text or ""
+        self.assertIn("=== a/scan.png ===\n[Not read: Unsupported content type: unknown]", text)
+        self.assertIn("=== b/outline.docx ===\nWeek 1\nSearch", text)
+        self.assertIn("Planning", text)
+        self.assertLess(text.index("a/scan.png"), text.index("b/outline.docx"))
+        self.assertEqual(docs["https://example.org/pics.zip"].status, "empty")
+
+    def test_drive_folders_are_read_through_the_embedded_view(self) -> None:
+        listing = (
+            "<html><head><title>CS3244 Mapping</title></head><body>"
+            + folder_entry("https://drive.google.com/file/d/F1/view?usp=drive_web", "Syllabus.pdf")
+            + folder_entry("https://drive.google.com/file/d/F2/view", "Gone.pdf")
+            + folder_entry("https://drive.google.com/drive/folders/SUB", "Old")
+            + "</body></html>"
+        )
+        calls = []
+
+        def fetch(url: str) -> Fetched:
+            calls.append(url)
+            if url == "https://drive.google.com/embeddedfolderview?id=FOLDER":
+                return Fetched(200, "text/html", listing.encode())
+            if url.endswith("id=F1"):
+                return Fetched(200, "application/pdf", pdf_bytes("Week one"))
+            return Fetched(404, "text/html", b"")
+
+        doc = fetch_document("https://drive.google.com/drive/folders/FOLDER?usp=sharing", fetch)
+        self.assertEqual((doc.status, doc.kind, doc.title), ("fetched", "folder", "CS3244 Mapping"))
+        self.assertIn("=== Gone.pdf ===\n[Not read: HTTP 404]", doc.text or "")
+        self.assertIn("=== Syllabus.pdf ===\nWeek one", doc.text or "")
+        self.assertEqual(len(calls), 3, "Subfolders are not followed")
+
+    def test_sign_in_and_bot_block_pages_are_failures(self) -> None:
+        def fetch(url: str) -> Fetched:
+            title = "Google Drive: Sign-in" if "drive" in url else "Request Rejected"
+            return Fetched(200, "text/html", f"<title>{title}</title><p>Sign in</p>".encode())
+
+        drive = fetch_document("https://drive.google.com/file/d/X/view", fetch)
+        self.assertEqual(
+            (drive.status, drive.error), ("failed", "Sign-in or block page: Google Drive: Sign-in")
+        )
+        self.assertEqual(fetch_document("https://example.org/c", fetch).status, "failed")
+
+    def test_hash_routes_are_rendered_even_when_the_index_is_long(self) -> None:
+        index = b"<html><body>" + b"<p>Admissions and faculties</p>" * 100 + b"</body></html>"
+        course = index.replace(b"<body>", b"<body><h1>EXU1001 Artificial Intelligence</h1>")
+        rendered = []
+
+        def render(url: str) -> bytes:
+            rendered.append(url)
+            return course
+
+        def fetch(url: str) -> Fetched:
+            return Fetched(200, "text/html", index)
+
+        routed = "https://example.org/catalog#/courses/EXU1001"
+        self.assertIn("EXU1001", fetch_document(routed, fetch, render).text or "")
+        fetch_document("https://example.org/catalog", fetch, render)
+        self.assertEqual(rendered, [routed])
+
+    def test_rate_limits_are_retried_once(self) -> None:
+        statuses = iter([429, 200, 503, 503])
+
+        def fetch(url: str) -> Fetched:
+            return Fetched(next(statuses), "text/plain", b"Outline")
+
+        with patch("edurec_mappings.documents.time.sleep") as sleep:
+            self.assertEqual(fetch_document("https://example.org/a", fetch).status, "fetched")
+            self.assertEqual(fetch_document("https://example.org/b", fetch).error, "HTTP 503")
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_renders_run_in_a_process_killed_at_the_deadline(self) -> None:
+        self.assertEqual(run_with_deadline([sys.executable, "-c", "print('ok')"], 30), b"ok\n")
+        with self.assertRaisesRegex(RuntimeError, "status 3"):
+            run_with_deadline([sys.executable, "-c", "raise SystemExit(3)"], 30)
+        # The child's own children (Playwright's driver and browser) must not hold it open.
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "exceeded 1 s"):
+            run_with_deadline(["sh", "-c", "sleep 30 & sleep 30"], 1)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_process_renderer_runs_fetch_html_with_the_export_settings(self) -> None:
+        with patch("edurec_mappings.documents.run_with_deadline", return_value=b"<p>x</p>") as run:
+            html = process_renderer("socks5://proxy:1080", 60000, 5000)("https://example.org/#/c")
+        self.assertEqual(html, b"<p>x</p>")
+        command, deadline = run.call_args.args
+        self.assertEqual(
+            " ".join(command[1:]),
+            "-m edurec_mappings fetch --html --timeout 60 --settle 5.0"
+            " --proxy socks5://proxy:1080 https://example.org/#/c",
+        )
+        self.assertEqual(deadline, 95)

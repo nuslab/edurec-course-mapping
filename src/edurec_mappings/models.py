@@ -16,7 +16,7 @@ from pydantic import Field, TypeAdapter
 RangeField = Literal["term", "group", "sequence"]
 ExportStatus = Literal["in_progress", "complete", "row_limit_reached", "interrupted"]
 FetchStatus = Literal["fetched", "empty", "too_large", "failed"]
-DocumentKind = Literal["pdf", "html", "text"]
+DocumentKind = Literal["pdf", "docx", "html", "text", "zip", "folder"]
 Verdict = Literal["approve", "reject", "request remapping", "request for more information"]
 Confidence = Literal["high", "medium", "low"]
 Action = Literal[Verdict, "not in approval queue"]

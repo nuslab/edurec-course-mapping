@@ -80,10 +80,16 @@ every split ends the export as `interrupted`.
 **URL scraping.** URLs in the partner course title, supporting URL, synopsis,
 other information, prerequisites and comments are fetched through the browser
 session. Dropbox, Google Drive file and Google Docs share links are rewritten to
-their download or export URLs. An HTML page with under 1,000 characters of text
-is re-read in a browser page to catch script-rendered catalogues. Text over
-200 KB is recorded as `too_large` and not stored. Failures are recorded per URL
-and never abort the export.
+their download or export URLs. PDF, Word (`.docx`), HTML and plain text are
+read; a zip archive (such as a Dropbox folder link) and the top level of a
+shared Google Drive folder (up to 20 files, no subfolders) are read file by
+file into one text with a `=== name ===` heading per file. An HTML page with
+under 1,000 characters of text, or a `#/` route, is re-read with `fetch --html`
+to catch script-rendered catalogues; that browser runs in its own process, is not
+signed in, and is killed 30 s after its page timeout and settle time. A short page titled as a sign-in or bot check
+is recorded as `failed`. HTTP 429 and 502–504 are retried once after 10 s. Text
+over 200 KB is recorded as `too_large` and not stored. Failures are recorded per
+URL and never abort the export.
 
 ### pending
 
@@ -121,7 +127,7 @@ queue gets action `not in approval queue`. Skips are offered again next session.
 
 Prints the title and text of one page after its scripts have run, in a fresh
 headless browser without login. For retrying links an export recorded as
-`empty` or `failed`.
+`empty` or `failed`. `--html` writes the rendered HTML instead.
 
 ## Store
 
@@ -160,7 +166,6 @@ module-mappings/
   Mapping Status filter. The NUS syllabus is not on the detail page and is not
   exported.
 - Session tokens and raw HTML are not stored.
-- Google Drive folder links are not expanded.
 - Loading is strict; a malformed proposal stops `review` naming the file.
 
 ## Quality gate
