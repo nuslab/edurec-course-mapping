@@ -8,52 +8,52 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 from edurec_mappings.anonymize import anonymize
-from edurec_mappings.apply import (
-    APPLIED,
-    OVERLAP_FAIR,
-    OVERLAP_GOOD,
-    UNVERIFIED,
-    VANISHED,
-    Item,
-    Progress,
-    apply,
-    comment_problem,
-    comment_source,
-    course_names,
-    load_applied,
-    load_queue,
-    overlap_colour,
-    panel_html,
-    select,
-    stale_reason,
-)
 from edurec_mappings.browser import (
     BUTTONS,
     CANCEL,
     COMMENTS,
-    Applier,
     NotInQueueError,
+    Reviewer,
     button_for,
 )
-from edurec_mappings.cli import DOWNLOAD_TABLES, forget_downloads, main, parse_apply_args
+from edurec_mappings.cli import DOWNLOAD_TABLES, forget_downloads, main, parse_args
 from edurec_mappings.models import (
     NOT_IN_QUEUE,
     PENDING,
-    Applied,
     Clicked,
     Decision,
     Left,
     Request,
+    Reviewed,
     Skipped,
     as_dict,
     hydrate,
 )
 from edurec_mappings.parse import DETAIL
+from edurec_mappings.review import (
+    OVERLAP_FAIR,
+    OVERLAP_GOOD,
+    REVIEWED,
+    UNVERIFIED,
+    VANISHED,
+    Item,
+    Progress,
+    comment_problem,
+    comment_source,
+    course_names,
+    load_queue,
+    load_reviewed,
+    overlap_colour,
+    panel_html,
+    review,
+    select,
+    stale_reason,
+)
 from edurec_mappings.store import document, dump, save
-from tests.test_extract import records
+from tests.test_export import records
 
 STARTED = "2026-09-22T10:00:00+00:00"
-PROGRESS = Progress(position=3, total=12, applied=5, requests=104)
+PROGRESS = Progress(position=3, total=12, submitted=5, requests=104)
 GREEN, AMBER, RED = "#2e7d32", "#ef6c00", "#c62828"
 FALLBACK = {
     "fallback_verdict": "request remapping",
@@ -144,7 +144,7 @@ class FakeSite:
         return self.status_after
 
 
-class ApplyTests(unittest.TestCase):
+class ReviewTests(unittest.TestCase):
     def test_hydrate_is_the_inverse_of_plain(self):
         _, request = records()[0]
         loaded = hydrate(Request, yaml.safe_load(dump(request.to_dict())))
@@ -196,7 +196,7 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(abs(sibling_positions[0] - sibling_positions[1]), 1)
             self.assertEqual(set(ids), {r.request_id for r in requests})
             log = [
-                Applied(
+                Reviewed(
                     request_id=requests[2].request_id,
                     verdict_recommended="approve",
                     action="approve",
@@ -204,10 +204,10 @@ class ApplyTests(unittest.TestCase):
                     comment_edited=False,
                     status_before=PENDING,
                     status_after="Approved",
-                    applied_at=STARTED,
+                    reviewed_at=STARTED,
                     dry_run=False,
                 ),
-                Applied(
+                Reviewed(
                     request_id=requests[3].request_id,
                     verdict_recommended="approve",
                     action="skip",
@@ -215,7 +215,7 @@ class ApplyTests(unittest.TestCase):
                     comment_edited=False,
                     status_before=PENDING,
                     status_after=None,
-                    applied_at=STARTED,
+                    reviewed_at=STARTED,
                     dry_run=False,
                     reason="reviewer skipped",
                 ),
@@ -224,7 +224,7 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(
                 {item.request.request_id for item in remaining},
                 {r.request_id for r in (requests[0], requests[1], requests[3])},
-                "Applied requests are skipped; skipped ones are offered again",
+                "Submitted requests are skipped; skipped ones are offered again",
             )
             self.assertEqual(
                 [i.request.request_id for i in select(queue, [], verdicts=["reject"])],
@@ -240,7 +240,7 @@ class ApplyTests(unittest.TestCase):
             queue, _ = load_queue(run, decisions)
             earlier = "2000-01-01T00:00:00+00:00"
             log = [
-                Applied(
+                Reviewed(
                     request_id=requests[0].request_id,
                     verdict_recommended="request remapping",
                     action="request remapping",
@@ -248,10 +248,10 @@ class ApplyTests(unittest.TestCase):
                     comment_edited=False,
                     status_before=PENDING,
                     status_after="not in approval queue",
-                    applied_at=earlier,
+                    reviewed_at=earlier,
                     dry_run=False,
                 ),
-                Applied(
+                Reviewed(
                     request_id=requests[1].request_id,
                     verdict_recommended="approve",
                     action="skip",
@@ -259,11 +259,11 @@ class ApplyTests(unittest.TestCase):
                     comment_edited=False,
                     status_before=PENDING,
                     status_after=None,
-                    applied_at=earlier,
+                    reviewed_at=earlier,
                     dry_run=False,
                     reason=VANISHED,
                 ),
-                Applied(
+                Reviewed(
                     request_id=requests[2].request_id,
                     verdict_recommended="approve",
                     action="approve",
@@ -271,7 +271,7 @@ class ApplyTests(unittest.TestCase):
                     comment_edited=False,
                     status_before=PENDING,
                     status_after="Approved",
-                    applied_at=STARTED,
+                    reviewed_at=STARTED,
                     dry_run=False,
                 ),
             ]
@@ -287,11 +287,11 @@ class ApplyTests(unittest.TestCase):
                 "Without an export start, every entry counts as before",
             )
 
-    def test_applied_log_round_trip(self):
+    def test_reviewed_log_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / APPLIED
-            self.assertEqual(load_applied(path), [])
-            entry = Applied(
+            path = Path(directory) / REVIEWED
+            self.assertEqual(load_reviewed(path), [])
+            entry = Reviewed(
                 request_id="abc",
                 verdict_recommended="reject",
                 action="skip",
@@ -299,12 +299,12 @@ class ApplyTests(unittest.TestCase):
                 comment_edited=False,
                 status_before=PENDING,
                 status_after=None,
-                applied_at=STARTED,
+                reviewed_at=STARTED,
                 dry_run=True,
                 reason="comment is empty",
             )
             path.write_text(dump([as_dict(entry)]))
-            self.assertEqual(load_applied(path), [entry])
+            self.assertEqual(load_reviewed(path), [entry])
 
     def test_freshness_comparison(self):
         _, exported = records()[0]
@@ -347,7 +347,7 @@ class ApplyTests(unittest.TestCase):
                 setattr(item.decision, key, value)
             sibling = requests[1].request_id
             log = [
-                Applied(
+                Reviewed(
                     request_id=sibling,
                     verdict_recommended="approve",
                     action="reject",
@@ -355,7 +355,7 @@ class ApplyTests(unittest.TestCase):
                     comment_edited=True,
                     status_before=PENDING,
                     status_after="Rejected",
-                    applied_at=STARTED,
+                    reviewed_at=STARTED,
                     dry_run=False,
                 )
             ]
@@ -467,7 +467,7 @@ class ApplyTests(unittest.TestCase):
             self.assertIn("No fallback", panel_html(item, PROGRESS, [], dry_run=False))
             self.assertIn("Previous comments", panel_html(item, PROGRESS, [], False, existing="x"))
             self.assertNotIn("Previous comments", html)
-            self.assertIn(f"{requests[1].request_id}: not yet applied", html)
+            self.assertIn(f"{requests[1].request_id}: not yet submitted", html)
             self.assertNotIn("different action", html)
 
     def test_header_badges_colour_confidence_and_overlap(self):
@@ -529,7 +529,7 @@ class ApplyTests(unittest.TestCase):
                 },
                 live={ids[3]: stale},
             )
-            log = {e.request_id: e for e in apply(site, run, decisions)}
+            log = {e.request_id: e for e in review(site, run, decisions)}
             self.assertEqual(len(site.prepared), 3, "The stale request never gets a panel")
             self.assertEqual([log[i].action for i in ids], ["approve", "reject", "skip", "skip"])
             self.assertEqual(log[ids[0]].comment_edited, False)
@@ -543,16 +543,16 @@ class ApplyTests(unittest.TestCase):
                 (log[ids[0]].status_before, log[ids[0]].status_after), (PENDING, "Approved")
             )
             self.assertIn("Approved", log[ids[3]].reason or "")
-            self.assertEqual({e.request_id: e for e in load_applied(decisions / APPLIED)}, log)
+            self.assertEqual({e.request_id: e for e in load_reviewed(decisions / REVIEWED)}, log)
 
             # A second session offers only the skipped ones and records a cancel.
             site = FakeSite({ids[2]: Clicked("#ICList", None), ids[3]: Skipped()})
-            second = {e.request_id: e for e in apply(site, run, decisions)}
+            second = {e.request_id: e for e in review(site, run, decisions)}
             self.assertEqual(sorted(site.opened), sorted(ids[2:]))
             self.assertEqual({e.action for e in second.values()}, {"skip"})
             self.assertIn("Cancel", second[ids[2]].reason or "")
             self.assertEqual(second[ids[3]].reason, "skipped by the reviewer")
-            self.assertEqual(len(load_applied(decisions / APPLIED)), 6)
+            self.assertEqual(len(load_reviewed(decisions / REVIEWED)), 6)
             panels = [panel for _, panel, _ in site.prepared]
             ordered(panels[0], "width:50%", "1 of 2 this session &middot; 2 of 4 overall")
             ordered(panels[1], "width:100%", "2 of 2 this session &middot; 2 of 4 overall")
@@ -562,14 +562,14 @@ class ApplyTests(unittest.TestCase):
             run, decisions, requests = make_run(directory, count=2)
             ids = [r.request_id for r in requests]
             site = FakeSite({ids[0]: Skipped(), ids[1]: Skipped()})
-            log = apply(site, run, decisions, dry_run=True)
+            log = review(site, run, decisions, dry_run=True)
             self.assertTrue(all(e.dry_run and e.action == "skip" for e in log))
             self.assertTrue(all(dry for _, _, dry in site.prepared))
             outcomes = {i: Clicked(button_for("approve"), "c") for i in ids}
             site = FakeSite(outcomes, status_after=PENDING)
             with self.assertRaisesRegex(RuntimeError, "not verified"):
-                apply(site, run, decisions)
-            entries = load_applied(decisions / APPLIED)
+                review(site, run, decisions)
+            entries = load_reviewed(decisions / REVIEWED)
             self.assertEqual(entries[-1].action, "approve")
             self.assertIn("not verified", entries[-1].reason or "")
             self.assertEqual(len(entries), 3)
@@ -582,7 +582,7 @@ class ApplyTests(unittest.TestCase):
                 {ids[0]: Left(), ids[2]: Skipped()},
                 live={ids[1]: NotInQueueError("gone")},
             )
-            log = {e.request_id: e for e in apply(site, run, decisions)}
+            log = {e.request_id: e for e in review(site, run, decisions)}
             self.assertEqual(
                 sorted(site.opened), sorted(ids), "The loop continues past a vanished request"
             )
@@ -594,12 +594,12 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(log[ids[1]].reason, VANISHED)
             # A vanished request is final: the next session neither opens nor re-logs it.
             site = FakeSite({ids[0]: Skipped(), ids[2]: Skipped()})
-            second = apply(site, run, decisions)
+            second = review(site, run, decisions)
             self.assertEqual(sorted(site.opened), sorted([ids[0], ids[2]]))
             self.assertEqual(sorted(e.request_id for e in second), sorted([ids[0], ids[2]]))
-            self.assertEqual(len(load_applied(decisions / APPLIED)), 5)
+            self.assertEqual(len(load_reviewed(decisions / REVIEWED)), 5)
             with self.assertRaisesRegex(RuntimeError, "boom"):
-                apply(FakeSite({}, live=dict.fromkeys(ids, RuntimeError("boom"))), run, decisions)
+                review(FakeSite({}, live=dict.fromkeys(ids, RuntimeError("boom"))), run, decisions)
 
     def test_click_is_on_record_before_verification_and_survives_a_crash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -609,8 +609,8 @@ class ApplyTests(unittest.TestCase):
             outcomes = {i: Clicked(button_for("approve"), comment) for i in ids}
             site = FakeSite(outcomes, status_after=RuntimeError("browser went away"))
             with self.assertRaisesRegex(RuntimeError, "browser went away"):
-                apply(site, run, decisions)
-            (entry,) = load_applied(decisions / APPLIED)
+                review(site, run, decisions)
+            (entry,) = load_reviewed(decisions / REVIEWED)
             first, other = site.opened[0], next(i for i in ids if i != site.opened[0])
             self.assertEqual((entry.request_id, entry.action), (first, "approve"))
             self.assertEqual(entry.comment_submitted, comment)
@@ -618,10 +618,10 @@ class ApplyTests(unittest.TestCase):
             self.assertIsNone(entry.status_after)
             # The provisional entry is final: the next session offers only the other request.
             site = FakeSite(outcomes)
-            log = apply(site, run, decisions)
+            log = review(site, run, decisions)
             self.assertEqual([e.request_id for e in log], [other])
             self.assertEqual(site.opened, [other])
-            entries = load_applied(decisions / APPLIED)
+            entries = load_reviewed(decisions / REVIEWED)
             self.assertEqual([e.request_id for e in entries], [first, other])
             self.assertEqual(entries[1].reason, None)
             self.assertEqual(entries[1].status_after, "Approved")
@@ -634,7 +634,7 @@ class ApplyTests(unittest.TestCase):
             (decisions / f"{requests[0].request_id}.yaml").write_text(dump(as_dict(advice)))
             outcome = Clicked(remap, advice.prefills(None)["fallback"], "fallback")
             site = FakeSite({requests[0].request_id: outcome}, status_after=NOT_IN_QUEUE)
-            (entry,) = apply(site, run, decisions)
+            (entry,) = review(site, run, decisions)
             self.assertEqual(entry.action, "request remapping")
             self.assertEqual(entry.comment_source, "fallback")
             self.assertFalse(entry.comment_edited)
@@ -647,7 +647,7 @@ class ApplyTests(unittest.TestCase):
             path = decisions / f"{requests[0].request_id}.yaml"
             path.write_text(dump(as_dict(decision(requests[0], comment="Use [code]"))))
             site = FakeSite({})
-            log = apply(site, run, decisions)
+            log = review(site, run, decisions)
             self.assertEqual(site.prepared, [])
             self.assertEqual(log[0].action, "skip")
             self.assertIn("[", log[0].reason or "")
@@ -702,7 +702,7 @@ class ApplyTests(unittest.TestCase):
                 "**/*", lambda route: route.fulfill(body=page_html, content_type="text/html")
             )
             page.goto("https://local.test/detail")
-            site = Applier(page.context)
+            site = Reviewer(page.context)
             box = page.locator(f'[id="{COMMENTS}"]')
             messages, posts, answers = [], [], []  # type: list[str], list[object], list[bool]
 
@@ -723,11 +723,11 @@ class ApplyTests(unittest.TestCase):
                 return f"document.getElementById('{button_id}').click();"
 
             def in_panel(selector):
-                host = "document.getElementById('edurec-apply-panel')"
+                host = "document.getElementById('edurec-review-panel')"
                 return f"{host}.shadowRoot.querySelector('{selector}')"
 
             def panel_state():
-                root = "document.getElementById('edurec-apply-panel').shadowRoot"
+                root = "document.getElementById('edurec-review-panel').shadowRoot"
                 return page.evaluate(f"""() => ({{
                     viewed: {in_panel(".tab.active")}?.dataset.tab,
                     selected: {in_panel(".pane.selected")}?.dataset.tab,
@@ -760,9 +760,9 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(recommended, advice.comment + "\n\nprior", "new comment on top")
             self.assertEqual(box.input_value(), recommended)
             self.assertEqual(page.evaluate("window.changes"), 1, "change event dispatched")
-            self.assertEqual(page.locator("#edurec-apply-panel").count(), 1)
+            self.assertEqual(page.locator("#edurec-review-panel").count(), 1)
             self.assertTrue(
-                page.evaluate("!!document.getElementById('edurec-apply-panel').shadowRoot")
+                page.evaluate("!!document.getElementById('edurec-review-panel').shadowRoot")
             )
             self.assertEqual(
                 page.evaluate(f"getComputedStyle({in_panel('#skip')}).color"),
@@ -841,7 +841,7 @@ class ApplyTests(unittest.TestCase):
                 const form = document.getElementById('N_EXSP_MOD_APPR');
                 const value = document.getElementById('{COMMENTS}').value;
                 const state = document.getElementById('ICStateNum').value;
-                document.getElementById('edurec-apply-panel').remove();
+                document.getElementById('edurec-review-panel').remove();
                 form.innerHTML = form.innerHTML;
                 document.getElementById('{COMMENTS}').value = value;
                 document.getElementById('ICStateNum').value = state + 'r';"""
@@ -890,7 +890,7 @@ class ApplyTests(unittest.TestCase):
             later(f"document.getElementById('{COMMENTS}').value = 'kept'; " + rerender)
             later(
                 f"""window.restored = {{
-                    panels: document.querySelectorAll('#edurec-apply-panel').length,
+                    panels: document.querySelectorAll('#edurec-review-panel').length,
                     disabled: [...'{",".join(BUTTONS)}'.split(',')].map(
                         id => document.getElementById(id).disabled),
                     value: document.getElementById('{COMMENTS}').value}};""",
@@ -980,16 +980,16 @@ class ApplyTests(unittest.TestCase):
             )
             browser.close()
 
-    def test_apply_arguments(self):
-        args = parse_apply_args(["--run", "out/x", "--request-id", "a", "--verdict", "reject"])
+    def test_review_arguments(self):
+        args = parse_args(["review", "--run", "out/x", "--request-id", "a", "--verdict", "reject"])
         self.assertEqual(args.decisions, str(Path("out/x-anonymized/decisions")))
         self.assertEqual((args.request_ids, args.verdicts), (["a"], ["reject"]))
         self.assertFalse(args.dry_run)
         self.assertEqual(args.timeout_ms, 60000)
         with self.assertRaises(SystemExit):
-            parse_apply_args(["--verdict", "maybe"])
+            parse_args(["review", "--verdict", "maybe"])
         with self.assertRaises(SystemExit):
-            main(["apply", "--verdict", "maybe"])
+            main(["review", "--verdict", "maybe"])
 
 
 if __name__ == "__main__":

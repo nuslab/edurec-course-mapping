@@ -13,7 +13,7 @@ from edurec_mappings.anonymize import anonymize, anonymized_path
 from edurec_mappings.browser import EduRec, subdivide
 from edurec_mappings.cli import configured_terms, optional_rows, parse_args, term_code
 from edurec_mappings.documents import MAX_TEXT_BYTES, scrape
-from edurec_mappings.extract import Checkpoint, extract
+from edurec_mappings.export import Checkpoint, export
 from edurec_mappings.models import Fetched, Listing, ListRow, Partition
 from edurec_mappings.parse import detail, digest
 from edurec_mappings.store import save
@@ -109,7 +109,7 @@ class FakeSite:
         return self.read_list()
 
 
-class ExtractTests(unittest.TestCase):
+class ExportTests(unittest.TestCase):
     def test_return_to_first_page_recovers_pagination(self):
         class ResetOnBack(FakeSite):
             def back(self):
@@ -117,7 +117,7 @@ class ExtractTests(unittest.TestCase):
                 return self.read_list()
 
         with tempfile.TemporaryDirectory() as directory:
-            data = extract(ResetOnBack(cap=100), Path(directory) / "reset")
+            data = export(ResetOnBack(cap=100), Path(directory) / "reset")
             self.assertEqual(len(data.requests), 10)
             self.assertEqual(data.collection.status, "complete")
 
@@ -128,11 +128,11 @@ class ExtractTests(unittest.TestCase):
             terms = configured_terms(path)
             self.assertEqual(terms, ["2610", "2620"])
             site = FakeSite()
-            data = extract(site, Path(directory) / "configured", terms=terms)
+            data = export(site, Path(directory) / "configured", terms=terms)
             self.assertEqual(len(data.requests), 3)
             self.assertEqual({p.term_low for p in site.searches}, {2610, 2620})
             self.assertEqual(data.collection.filters.terms, terms)
-            override = extract(FakeSite(cap=100), Path(directory) / "override", terms=["2600"])
+            override = export(FakeSite(cap=100), Path(directory) / "override", terms=["2600"])
             self.assertEqual(len(override.requests), 7)
 
     def test_invalid_term_configuration(self):
@@ -245,13 +245,13 @@ class ExtractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "stale"
             with self.assertRaisesRegex(RuntimeError, "outside the requested partition"):
-                extract(StaleSite(cap=100), path, terms=["2610"])
+                export(StaleSite(cap=100), path, terms=["2610"])
             self.assertFalse(inventory(path)["collection"]["all_request_details_collected"])
 
     def test_all_terms_and_all_pages_beyond_cap_without_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             site = FakeSite()
-            data = extract(site, Path(directory) / "all")
+            data = export(site, Path(directory) / "all")
             self.assertEqual(len(data.requests), 10)
             self.assertEqual({r.identity.term for r in data.requests}, {"2600", "2610"})
             self.assertTrue(data.collection.all_request_details_collected)
@@ -263,7 +263,7 @@ class ExtractTests(unittest.TestCase):
 
     def test_reassign_exact_case_insensitive_and_global_limit(self):
         with tempfile.TemporaryDirectory() as directory:
-            data = extract(
+            data = export(
                 FakeSite(cap=100), Path(directory) / "limited", reassign_id="owner", rows=3
             )
             self.assertEqual(len(data.requests), 3)
@@ -275,7 +275,7 @@ class ExtractTests(unittest.TestCase):
     def test_term_filter_and_yaml_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "term"
-            data = extract(FakeSite(), path, terms=["2610"])
+            data = export(FakeSite(), path, terms=["2610"])
             self.assertEqual(len(data.requests), 3)
             self.assertTrue(all(r.identity.term == "2610" for r in data.requests))
             self.assertEqual(inventory(path), data.inventory())
@@ -289,7 +289,7 @@ class ExtractTests(unittest.TestCase):
     def test_scrape_stage_writes_documents_once_and_caps_their_size(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scraped"
-            data = extract(FakeSite(), path, terms=["2610"])
+            data = export(FakeSite(), path, terms=["2610"])
             data.requests[0].comments = "see https://example.org/textbook.pdf"
             calls = []
 
@@ -324,7 +324,7 @@ class ExtractTests(unittest.TestCase):
     def test_anonymize_stage_writes_a_separate_pseudonymised_copy(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "raw"
-            data = extract(FakeSite(cap=100), path)
+            data = export(FakeSite(cap=100), path)
             for page in data.list_pages:
                 for row in page.rows:
                     row.student_name, row.user_id = "Real Name", "E123"
@@ -363,16 +363,16 @@ class ExtractTests(unittest.TestCase):
                 Path("../edurec-data/output/module-mappings-anonymized"),
             )
 
-    def test_stage_flags_and_anonymized_output_default(self):
-        args = parse_args(["--output", "out/x"])
+    def test_stage_flags_and_anonymized_run_default(self):
+        args = parse_args(["export", "--run", "out/x"])
         self.assertFalse(args.scrape_urls)
         self.assertFalse(args.anonymize)
-        self.assertEqual(args.anonymized_output, str(Path("out/x-anonymized")))
-        args = parse_args(["--scrape-urls", "--anonymize", "--anonymized-output", "a"])
+        self.assertEqual(args.anonymized_run, str(Path("out/x-anonymized")))
+        args = parse_args(["export", "--scrape-urls", "--anonymize", "--anonymized-run", "a"])
         self.assertTrue(args.scrape_urls and args.anonymize)
-        self.assertEqual(args.anonymized_output, "a")
+        self.assertEqual(args.anonymized_run, "a")
         with self.assertRaises(SystemExit):
-            parse_args(["--output", "x", "--anonymized-output", "./x"])
+            parse_args(["export", "--run", "x", "--anonymized-run", "./x"])
 
     def test_single_student_capped_search_splits_mapping_groups(self):
         entries = records()[:7]
@@ -381,14 +381,14 @@ class ExtractTests(unittest.TestCase):
             request.identity.student_id = "ONE_STUDENT"
         with tempfile.TemporaryDirectory() as directory:
             site = FakeSite(entries)
-            data = extract(site, Path(directory) / "one-student", terms=["2600"])
+            data = export(site, Path(directory) / "one-student", terms=["2600"])
             self.assertEqual(len(data.requests), 7)
             self.assertTrue(any(p.group_low != 0 or p.group_high != 999 for p in site.searches))
 
     def test_empty_and_no_matching_reassignee_complete(self):
         with tempfile.TemporaryDirectory() as directory:
             for site in (FakeSite([]), FakeSite(cap=100)):
-                data = extract(site, Path(directory) / "empty", reassign_id="MISSING")
+                data = export(site, Path(directory) / "empty", reassign_id="MISSING")
                 self.assertEqual(data.requests, [])
                 self.assertEqual(data.collection.status, "complete")
 
@@ -396,7 +396,7 @@ class ExtractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interrupted"
             with self.assertRaisesRegex(RuntimeError, "lost session"):
-                extract(FakeSite(cap=100, fail_after=1), path)
+                export(FakeSite(cap=100, fail_after=1), path)
             self.assertEqual(len(saved_requests(path)), 1)
             data = inventory(path)
             self.assertEqual(data["collection"]["status"], "interrupted")
@@ -405,9 +405,9 @@ class ExtractTests(unittest.TestCase):
     def test_rerun_into_the_same_directory_replaces_the_previous_export(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rerun"
-            extract(FakeSite(), path)
+            export(FakeSite(), path)
             self.assertEqual(len(saved_requests(path)), 10)
-            extract(FakeSite(), path, terms=["2610"])
+            export(FakeSite(), path, terms=["2610"])
             self.assertEqual(len(saved_requests(path)), 3)
 
     def test_indivisible_cap_fails_instead_of_claiming_complete(self):

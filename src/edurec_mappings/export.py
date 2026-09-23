@@ -20,7 +20,7 @@ from .store import document, reset, save
 
 
 class Site(Protocol):
-    """The navigation surface `extract` needs; `EduRec` implements it against the live site."""
+    """The navigation surface `export` needs; `EduRec` implements it against the live site."""
 
     def search(self, partition: Partition) -> Listing: ...
     def next_page(self) -> Listing: ...
@@ -123,7 +123,7 @@ class Extraction:
         self.checkpoint(request)
 
 
-def extract(
+def export(
     site: Site,
     output: str | Path,
     *,

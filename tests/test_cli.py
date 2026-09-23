@@ -1,16 +1,16 @@
-"""Orchestration in `cli` and `extract.restore_list`, driven through fakes."""
+"""Orchestration in `cli` and `export.restore_list`, driven through fakes."""
 
 import argparse
 import io
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from playwright.sync_api import Error as PlaywrightError
 
 from edurec_mappings import cli
 from edurec_mappings.browser import COMPONENT, ApprovalNotLoadedError
-from edurec_mappings.extract import restore_list
+from edurec_mappings.export import restore_list
 from edurec_mappings.models import Listing, ListRow
 
 NOT_LOADED = ApprovalNotLoadedError(
@@ -25,14 +25,14 @@ def namespace(**overrides):
         "cdp_url": None,
         "timeout": 60,
         "timeout_ms": 60000,
-        "output": "out",
+        "command": "export",
         "reassign_id": " ",
         "term": "",
         "rows": None,
         "terms": ["2620"],
         "scrape_urls": False,
         "anonymize": False,
-        "anonymized_output": "out-anonymized",
+        "anonymized_run": "run-anonymized",
         "run": "run",
         "decisions": "run-anonymized/decisions",
         "request_ids": [],
@@ -138,7 +138,7 @@ class RunTests(unittest.TestCase):
         for name in (
             "connect",
             "EduRec",
-            "extract",
+            "export",
             "playwright_fetcher",
             "playwright_renderer",
             "scrape",
@@ -146,14 +146,14 @@ class RunTests(unittest.TestCase):
             "reset",
             "save",
             "anonymize",
-            "Applier",
-            "apply",
+            "Reviewer",
+            "review",
             "hold_open",
         ):
             patcher = mock.patch.object(cli, name)
             self.mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
-        result = self.mocks["extract"].return_value
+        result = self.mocks["export"].return_value
         result.collection.status, result.requests = "complete", [1, 2]
         self.context = mock.MagicMock()
 
@@ -161,73 +161,78 @@ class RunTests(unittest.TestCase):
         self.context.on.assert_called_once_with("dialog", cli.manual_dialog)
         self.context.remove_listener.assert_called_with("dialog", cli.manual_dialog)
 
-    def test_run_extracts_with_the_parsed_filters(self):
-        out = quietly(cli.run, self.context, namespace())
+    def test_run_export_extracts_with_the_parsed_filters(self):
+        out = quietly(cli.run_export, self.context, namespace())
         self.mocks["EduRec"].assert_called_once_with(self.context, 60000)
-        self.mocks["extract"].assert_called_once_with(
+        self.mocks["export"].assert_called_once_with(
             self.mocks["EduRec"].return_value,
-            "out",
+            "run",
             reassign_id="",
             rows=None,
             terms=["2620"],
         )
-        self.assertIn("complete: 2 requests → out", out)
+        self.assertIn("complete: 2 requests → run", out)
         self.mocks["scrape"].assert_not_called()
         self.mocks["save"].assert_not_called()
         self.assert_dialog_hook_removed()
 
     def test_run_scrapes_and_anonymizes_when_asked(self):
-        quietly(cli.run, self.context, namespace(scrape_urls=True, anonymize=True))
+        quietly(cli.run_export, self.context, namespace(scrape_urls=True, anonymize=True))
         self.mocks["scrape"].assert_called_once()
-        self.mocks["reset"].assert_called_once_with("out-anonymized")
+        self.mocks["reset"].assert_called_once_with("run-anonymized")
         self.mocks["save"].assert_called_once_with(
-            self.mocks["anonymize"].return_value, "out-anonymized"
+            self.mocks["anonymize"].return_value, "run-anonymized"
         )
 
     def test_run_holds_the_browser_open_on_error(self):
-        self.mocks["extract"].side_effect = RuntimeError("lost session")
+        self.mocks["export"].side_effect = RuntimeError("lost session")
         with self.assertRaises(RuntimeError):
-            cli.run(self.context, namespace())
+            cli.run_export(self.context, namespace())
         self.mocks["hold_open"].assert_called_once_with(
             mock.ANY, "Collection stopped: lost session. Checkpoint retained."
         )
         self.assert_dialog_hook_removed()
 
-    def test_run_apply_passes_the_filters_and_reports_errors(self):
+    def test_run_review_passes_the_filters_and_reports_errors(self):
         args = namespace(request_ids=["r1"], verdicts=["approve"], dry_run=True)
-        quietly(cli.run_apply, self.context, args)
-        self.mocks["Applier"].assert_called_once_with(self.context, 60000)
-        self.mocks["apply"].assert_called_once_with(
-            self.mocks["Applier"].return_value,
+        quietly(cli.run_review, self.context, args)
+        self.mocks["Reviewer"].assert_called_once_with(self.context, 60000)
+        self.mocks["review"].assert_called_once_with(
+            self.mocks["Reviewer"].return_value,
             "run",
             "run-anonymized/decisions",
             request_ids=["r1"],
             verdicts=["approve"],
             dry_run=True,
         )
-        self.mocks["apply"].side_effect = RuntimeError("boom")
+        self.mocks["review"].side_effect = RuntimeError("boom")
         with redirect_stdout(io.StringIO()) as out, self.assertRaises(RuntimeError):
-            cli.run_apply(self.context, args)
-        self.assertIn("Apply stopped: boom. Log retained.", out.getvalue())
+            cli.run_review(self.context, args)
+        self.assertIn("Review stopped: boom. Log retained.", out.getvalue())
         self.mocks["hold_open"].assert_not_called()
 
 
 class ParseArgsTests(unittest.TestCase):
     def test_explicit_term_is_left_to_extract_and_blank_reads_the_configuration(self):
-        self.assertEqual(cli.parse_args(["--term", "2610"]).terms, ["2610"])
-        self.assertTrue(cli.parse_args([]).terms)
+        self.assertEqual(cli.parse_args(["export", "--term", "2610"]).terms, ["2610"])
+        self.assertTrue(cli.parse_args(["export"]).terms)
+
+    def test_a_command_is_required(self):
+        for argv in ([], ["--term", "2610"]):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                cli.parse_args(argv)
 
 
 class RenderTests(unittest.TestCase):
-    def test_render_prints_title_and_text_and_closes_the_browser(self):
+    def test_fetch_prints_title_and_text_and_closes_the_browser(self):
         html = b"<html><title>Syllabus</title><body><p>Week 1</p></body></html>"
         with (
             mock.patch.object(cli, "sync_playwright") as playwright,
             mock.patch.object(cli, "playwright_renderer", return_value=lambda url: html) as make,
         ):
             browser = playwright.return_value.__enter__.return_value.chromium.launch.return_value
-            args = cli.parse_render_args(["https://example.com", "--settle", "2"])
-            out = quietly(cli.run_render, args)
+            args = cli.parse_args(["fetch", "https://example.com", "--settle", "2"])
+            out = quietly(cli.run_fetch, args)
         self.assertEqual(out, "Syllabus\nSyllabus\nWeek 1\n")
         make.assert_called_once_with(browser.new_context.return_value, 90000, 2000)
         browser.close.assert_called_once()

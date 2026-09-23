@@ -11,7 +11,7 @@ The records fall into three groups:
 - `Collection`, `SearchAudit`, `ListPage` and `MappingGroup` are the extraction
   audit that lets an export say whether it is complete.
 - `Decision` is the AI course mapping advisor's verdict on one request, and
-  `Applied` records what the human reviewer then did with it in EduRec.
+  `Reviewed` records what the human reviewer then did with it in EduRec.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ TERM_PATTERN = re.compile(r"\d{4}")
 MANY_TO_ONE = "Many to One"
 PENDING = "Pending Approval"
 NOT_IN_QUEUE = "not in approval queue"
-"""`Applied.status_after` when a submission removed the request from the approval queue."""
+"""`Reviewed.status_after` when a submission removed the request from the approval queue."""
 
 
 GREEN, AMBER, RED = "#2e7d32", "#ef6c00", "#c62828"
@@ -477,8 +477,8 @@ def stack(comment: str, existing: str | None) -> str:
 
 
 @dataclass
-class Applied:
-    """`decisions/applied.yaml` entry: the outcome of showing one decision to the reviewer.
+class Reviewed:
+    """`decisions/reviewed.yaml` entry: the outcome of showing one decision to the reviewer.
 
     `action` is the EduRec button the reviewer pressed, or `skip` when the request
     was passed over (by the reviewer, by a freshness check, or in a dry run);
@@ -493,7 +493,7 @@ class Applied:
     """True when the submitted comment differs from the pre-filled comment of the active tab."""
     status_before: str | None
     status_after: str | None
-    applied_at: str
+    reviewed_at: str
     dry_run: bool
     reason: str | None = None
     comment_source: CommentSource | None = None

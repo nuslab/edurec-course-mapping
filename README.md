@@ -3,7 +3,7 @@
 Read-only extraction of NUS EduRec **Course Mapping Approval** requests into
 a run directory of YAML files. The package collects structured evidence, optionally the
 text of linked syllabus documents, and never decides anything itself. Its
-`apply` stage (below) walks a human reviewer through the advisor's decisions in
+`review` command (below) walks a human reviewer through the advisor's decisions in
 EduRec; the reviewer presses EduRec's buttons, the program only watches and logs.
 
 ## Layout
@@ -13,13 +13,13 @@ edurec-mappings/
 ├── pyproject.toml            # package metadata; installs the `edurec-mappings` command
 ├── src/edurec_mappings/
 │   ├── cli.py                # argument parsing, login prompt, browser lifecycle
-│   ├── extract.py            # cap-aware search loop with YAML checkpoints
+│   ├── export.py             # cap-aware search loop with YAML checkpoints
 │   ├── browser.py            # EduRec navigation (search form, paging, detail, View 100)
 │   ├── models.py             # dataclasses for rows, requests, linked documents and the export
 │   ├── parse.py              # list/detail HTML parsing into those records
 │   ├── documents.py          # download and text extraction of URLs in course details
 │   ├── anonymize.py          # pseudonymised copy of an export
-│   ├── apply.py              # reviewer walk-through of the decisions, with applied.yaml log
+│   ├── review.py             # reviewer walk-through of the decisions, with reviewed.yaml log
 │   └── terms.yaml            # terms searched when --term is blank
 └── tests/                    # unittest suite; fixtures/ holds trimmed EduRec pages
 
@@ -47,12 +47,13 @@ that desktop; do not wrap the command in `xvfb-run`.
 Run from this directory; the default paths are relative to it.
 
 ```sh
-edurec-mappings --reassign-id '' --term '' --rows '' --scrape-urls --anonymize \
-  --output ../edurec-data/output/module-mappings
+edurec-mappings export --scrape-urls --anonymize --run ../edurec-data/output/module-mappings
 ```
 
-`python3 -m edurec_mappings` is equivalent. Log in through VNC, accept the
-policy if you agree. The command
+The command has three subcommands, `export`, `review` and `fetch`;
+`edurec-mappings --help` lists them and `python3 -m edurec_mappings` is
+equivalent. Log in through VNC, accept the
+policy if you agree. `export`
 runs three steps once the approval form is visible (detected automatically after login; Enter retries at once): it applies its own search filters, switches the results grid
 to **View 100**, opens every matching request and checkpoints the run
 directory after each detail; with `--scrape-urls` it then fetches every URL
@@ -70,12 +71,12 @@ serve files shared with anyone without a sign-in); with
 | `--term` | One four-digit term code, e.g. `2610` | Every term in `terms.yaml` (override with `--terms-file`) |
 | `--rows` | Stop after this many unique requests | All matching requests |
 | `--scrape-urls` | Fetch URLs in course details and store their text | `linked_documents` stays `null` |
-| `--anonymize` | Also write `<output>-anonymized/` (or `--anonymized-output`) | Original only |
+| `--anonymize` | Also write `<run>-anonymized/` (or `--anonymized-run`) | Original only |
 | `--cdp-url URL --ready` | Attach to a running, logged-in Chromium; left open on exit | Launch a browser on `--profile` and prompt for login |
 
-`--help` lists the rest (`--profile`, `--proxy`, `--timeout`).
+`export --help` lists the rest (`--profile`, `--proxy`, `--timeout`).
 
-`edurec-mappings render URL` prints the title and text of one page after its
+`edurec-mappings fetch URL` prints the title and text of one page after its
 scripts have run, in a fresh headless browser without login (`--proxy`,
 `--timeout`, `--settle` seconds after network idle). It is for the reviewer or
 the course-mapping advisor to retry a link that an older export recorded as a
@@ -94,7 +95,7 @@ claim of completeness. Results follow search order, not a global sort.
 
 ## Export
 
-`--output` names a run directory that is both the export and the checkpoint.
+`--run` names a run directory that is both the export and the checkpoint.
 It is laid out so that an AI advisor can read one request at a time instead of
 the whole inventory:
 
@@ -104,7 +105,7 @@ module-mappings/
 ├── requests/<request_id>.yaml   # one file per unique request
 ├── documents/<hash>.txt      # scraped text, one file per URL (--scrape-urls)
 ├── decisions/<request_id>.yaml  # written by the course-mapping advisor, not by this package
-└── decisions/applied.yaml    # written by `edurec-mappings apply`
+└── decisions/reviewed.yaml    # written by `edurec-mappings review`
 ```
 
 Starting a run removes the first three entries from the directory and leaves
@@ -145,7 +146,7 @@ within the copy, drops student names and user IDs, and sets
 `collection.anonymized: true`. The salt is random per run and never stored, so
 pseudonyms cannot be reversed or matched across exports.
 
-## Apply
+## Review
 
 Once the advisor has written `decisions/` inside the anonymized copy, submit
 them in EduRec yourself with the program as a guide. Try `--dry-run` first: it
@@ -153,8 +154,8 @@ walks the same queue with the action buttons disabled, so you can read the
 panels and check the pre-filled comments without submitting anything.
 
 ```sh
-edurec-mappings apply --run ../edurec-data/output/module-mappings --dry-run
-edurec-mappings apply --run ../edurec-data/output/module-mappings
+edurec-mappings review --run ../edurec-data/output/module-mappings --dry-run
+edurec-mappings review --run ../edurec-data/output/module-mappings
 ```
 
 `--decisions` defaults to `<run>-anonymized/decisions`; `--request-id` and
@@ -175,7 +176,7 @@ into it. From top to bottom it shows:
   red for reject, amber for the two requests; the matching EduRec button gets
   an outline in the same colour) and the overlap percentage (green from 70%,
   amber from 40%, red below); under them the course, a thin progress bar and
-  the caption `<position> of <total> this session · <applied> of <requests>
+  the caption `<position> of <total> this session · <submitted> of <requests>
   overall`;
 - two tabs, **Recommended** and **Fallback**, each a bordered card. Clicking a
   tab only previews its pane. A selectable pane opens with **Decision:**
@@ -226,7 +227,7 @@ on an error it closes the browser instead of leaving the page open, because a
 click on an unwatched page would go unrecorded; do not act in EduRec after the
 program has stopped.
 
-Every outcome is appended to `decisions/applied.yaml` before the next request
+Every outcome is appended to `decisions/reviewed.yaml` before the next request
 opens: request id, recommended verdict, the action taken (a verdict or
 `skip`), the comment as submitted, which text it was (`comment_source` is
 `recommended`, `fallback`, or `edited` when the box differed from the selected
@@ -241,7 +242,7 @@ sibling was already submitted with a different action.
 ## Guarantees and limits
 
 - Extraction only uses search, row-open, list-return, next-page and view-size
-  actions. `apply` additionally sets the comment box and waits for a click; it
+  actions. `review` additionally sets the comment box and waits for a click; it
   never triggers an EduRec action button itself.
 - With `--scrape-urls`, URLs in the supporting URL, synopsis, other
   information, prerequisites and comments are fetched through the browser

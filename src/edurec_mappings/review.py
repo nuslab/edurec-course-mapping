@@ -5,7 +5,7 @@ comment and injects a panel with the decision. The reviewer presses one of
 EduRec's own buttons (or the panel's Skip); the program never does. After the
 postback it verifies that the status left "Pending Approval" (a request that
 disappeared from the approval queue counts as verified) and appends an
-`Applied` entry to `decisions/applied.yaml`.
+`Reviewed` entry to `decisions/reviewed.yaml`.
 
 Only clicks made while the panel is shown are observed and logged.
 """
@@ -30,13 +30,13 @@ from .models import (
     PENDING,
     RED,
     VERDICT_COLOURS,
-    Applied,
     CommentSource,
     Confidence,
     Decision,
     Left,
     Outcome,
     Request,
+    Reviewed,
     Skipped,
     Tab,
     display,
@@ -46,7 +46,7 @@ from .models import (
 from .store import INVENTORY, REQUESTS, dump, now, write_atomic
 
 DECISIONS = "decisions"
-APPLIED = "applied.yaml"
+REVIEWED = "reviewed.yaml"
 VANISHED = "no longer in the approval queue"
 """Skip reason for a request that left the approval queue; final, since it cannot return."""
 UNVERIFIED = "submission observed, not yet verified"
@@ -100,17 +100,17 @@ OVERLAP_FAIR = 40
 
 
 class Log:
-    """`decisions/applied.yaml`: every change is written through at once, atomically."""
+    """`decisions/reviewed.yaml`: every change is written through at once, atomically."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.entries = load_applied(path)
+        self.entries = load_reviewed(path)
 
-    def append(self, entry: Applied) -> None:
+    def append(self, entry: Reviewed) -> None:
         self.entries.append(entry)
         self.flush()
 
-    def replace_last(self, entry: Applied) -> None:
+    def replace_last(self, entry: Reviewed) -> None:
         self.entries[-1] = entry
         self.flush()
 
@@ -124,14 +124,14 @@ class Progress(NamedTuple):
     position: int
     total: int
     """Requests in this session's queue."""
-    applied: int
+    submitted: int
     """Requests logged with a verdict, across all sessions."""
     requests: int
     """Requests in the run."""
 
 
 class Site(Protocol):
-    """The browser surface `apply` needs; `Applier` implements it against the live site."""
+    """The browser surface `review` needs; `Reviewer` implements it against the live site."""
 
     def open(self, request: Request) -> Request:
         """Reopen the request; raises `NotInQueueError` when it left the approval queue."""
@@ -193,15 +193,15 @@ def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict
 def decision_files(decisions: Path) -> Iterator[object]:
     """The parsed content of each decision file, in file-name order; the log is not one."""
     for path in sorted(decisions.glob("*.yaml")):
-        if path.name != APPLIED:
+        if path.name != REVIEWED:
             yield yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def load_applied(path: Path) -> list[Applied]:
+def load_reviewed(path: Path) -> list[Reviewed]:
     if not path.exists():
         return []
     entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
-    return [hydrate(Applied, entry) for entry in entries]
+    return [hydrate(Reviewed, entry) for entry in entries]
 
 
 def course_names(decisions: Path) -> dict[str, str]:
@@ -226,10 +226,10 @@ def comment_source(
     return next((t for t in candidates if prefills[t].strip() == text), "edited")
 
 
-def since_export(log: Iterable[Applied], started: str | None) -> list[Applied]:
+def since_export(log: Iterable[Reviewed], started: str | None) -> list[Reviewed]:
     """The log entries made after the export started.
 
-    A request id survives resubmission: a request applied before the export was
+    A request id survives resubmission: a request submitted before the export was
     taken and exported again as pending is a new round, so its earlier entries
     do not count against it. Entries whose timestamp cannot be read are kept.
     """
@@ -239,10 +239,10 @@ def since_export(log: Iterable[Applied], started: str | None) -> list[Applied]:
         cutoff = datetime.fromisoformat(started)
     except ValueError:
         return list(log)
-    kept: list[Applied] = []
+    kept: list[Reviewed] = []
     for entry in log:
         try:
-            if datetime.fromisoformat(entry.applied_at) < cutoff:
+            if datetime.fromisoformat(entry.reviewed_at) < cutoff:
                 continue
         except ValueError:
             pass
@@ -252,12 +252,12 @@ def since_export(log: Iterable[Applied], started: str | None) -> list[Applied]:
 
 def select(
     queue: Iterable[Item],
-    log: Iterable[Applied],
+    log: Iterable[Reviewed],
     request_ids: Iterable[str] = (),
     verdicts: Iterable[str] = (),
     started: str | None = None,
 ) -> list[Item]:
-    """Drop requests already applied and apply the CLI filters.
+    """Drop requests already submitted and apply the CLI filters.
 
     Skips are offered again, except a request that left the approval queue:
     it cannot come back, so its skip is final. Only entries made since the
@@ -354,7 +354,7 @@ def pane(tab: Tab, verdict: str | None, comment: str, note: str = "", *, badge: 
 def panel_html(
     item: Item,
     progress: Progress,
-    log: Iterable[Applied],
+    log: Iterable[Reviewed],
     dry_run: bool,
     *,
     existing: str | None = None,
@@ -363,7 +363,7 @@ def panel_html(
     """The reviewer's panel, rendered into a shadow root; every value is HTML-escaped."""
     decision, request = item.decision, item.request
     courses = courses or {}
-    latest: dict[str, Applied] = {}
+    latest: dict[str, Reviewed] = {}
     for entry in log:
         if entry.action != "skip":
             latest[entry.request_id] = entry
@@ -381,7 +381,7 @@ def panel_html(
     done = round(100 * progress.position / progress.total) if progress.total else 0
     caption = (
         f"{progress.position} of {progress.total} this session &middot; "
-        f"{progress.applied} of {progress.requests} overall"
+        f"{progress.submitted} of {progress.requests} overall"
     )
     parts = [
         f"<style>{PANEL_CSS}</style>",
@@ -425,9 +425,9 @@ def panel_html(
     if request.related_request_ids:
         parts += [label("Siblings (many-to-one)"), "<ul>"]
         for sibling in request.related_request_ids:
-            applied = latest.get(sibling)
-            status = escape(applied.action) if applied else "not yet applied"
-            if applied and applied.action != decision.verdict:
+            logged = latest.get(sibling)
+            status = escape(logged.action) if logged else "not yet submitted"
+            if logged and logged.action != decision.verdict:
                 status += " " + warn("different action")
             parts.append(f"<li>{escape(courses.get(sibling, sibling))}: {status}</li>")
         parts.append("</ul>")
@@ -441,16 +441,16 @@ def panel_html(
     return "".join(parts)
 
 
-def review(
+def review_item(
     site: Site,
     item: Item,
     *,
     progress: Progress,
-    log: list[Applied],
+    log: list[Reviewed],
     courses: Mapping[str, str],
     dry_run: bool,
-    record: Callable[[Applied], None] = lambda entry: None,
-) -> Applied:
+    record: Callable[[Reviewed], None] = lambda entry: None,
+) -> Reviewed:
     """Show one decision to the reviewer and return what happened.
 
     `record` is called with a provisional entry as soon as an EduRec button is
@@ -462,7 +462,7 @@ def review(
         live = site.open(exported)
     except NotInQueueError:
         live = None
-    entry = Applied(
+    entry = Reviewed(
         request_id=exported.request_id,
         verdict_recommended=decision.verdict,
         action="skip",
@@ -470,7 +470,7 @@ def review(
         comment_edited=False,
         status_before=live.status if live else None,
         status_after=None,
-        applied_at=now(),
+        reviewed_at=now(),
         dry_run=dry_run,
     )
     if live is None:
@@ -494,7 +494,7 @@ def review(
             entry,
             action=verdict,
             comment_submitted=clicked.comment,
-            applied_at=now(),
+            reviewed_at=now(),
             reason=UNVERIFIED,
         )
     )
@@ -507,7 +507,7 @@ def review(
         comment_edited=source == "edited",
         comment_source=source,
         status_after=status_after,
-        applied_at=now(),
+        reviewed_at=now(),
         reason=(
             f"submission not verified: live status is {status_after!r}"
             if status_after in (None, PENDING)
@@ -516,7 +516,7 @@ def review(
     )
 
 
-def apply(
+def review(
     site: Site,
     run: str | Path,
     decisions: str | Path | None = None,
@@ -524,10 +524,10 @@ def apply(
     request_ids: Iterable[str] = (),
     verdicts: Iterable[str] = (),
     dry_run: bool = False,
-) -> list[Applied]:
+) -> list[Reviewed]:
     """Walk the queue with the reviewer; returns this session's log entries.
 
-    Every entry is written to `decisions/applied.yaml` before the next request is
+    Every entry is written to `decisions/reviewed.yaml` before the next request is
     opened, and a provisional entry is written the moment a click is seen: an
     error after the click leaves the verdict on record with the error as reason,
     then the session stops. A submission whose status did not leave "Pending
@@ -540,7 +540,7 @@ def apply(
     queue, rejected = load_queue(run, decisions)
     for request_id, why in rejected.items():
         print(f"Not applicable {request_id}: {why}", flush=True)
-    log = Log(decisions / APPLIED)
+    log = Log(decisions / REVIEWED)
     started = started_at(decisions.parent)
     vanished = {
         entry.request_id
@@ -552,19 +552,19 @@ def apply(
     queue = select(queue, log.entries, request_ids, verdicts, started)
     courses = course_names(decisions)
     requests = sum(1 for _ in (run / REQUESTS).glob("*.yaml"))
-    session: list[Applied] = []
+    session: list[Reviewed] = []
     for position, item in enumerate(queue, 1):
-        applied = {entry.request_id for entry in log.entries if entry.action != "skip"}
-        progress = Progress(position, len(queue), len(applied), requests)
-        provisional: Applied | None = None
+        submitted = {entry.request_id for entry in log.entries if entry.action != "skip"}
+        progress = Progress(position, len(queue), len(submitted), requests)
+        provisional: Reviewed | None = None
 
-        def record(entry: Applied) -> None:
+        def record(entry: Reviewed) -> None:
             nonlocal provisional
             provisional = entry
             log.append(entry)
 
         try:
-            entry = review(
+            entry = review_item(
                 site,
                 item,
                 progress=progress,
@@ -592,5 +592,5 @@ def apply(
             raise RuntimeError(f"{entry.request_id}: {entry.reason}")
     counts = Counter(entry.action for entry in session)
     summary = ", ".join(f"{count} {action}" for action, count in sorted(counts.items()))
-    print(f"Applied {len(session)} of {len(queue)} queued: {summary or 'nothing'} → {log.path}")
+    print(f"Reviewed {len(session)} of {len(queue)} queued: {summary or 'nothing'} → {log.path}")
     return session

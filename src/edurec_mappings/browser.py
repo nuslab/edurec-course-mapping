@@ -1,6 +1,6 @@
 """Navigation of the Course Mapping Approval component through Playwright.
 
-`EduRec` is read-only; `Applier` adds what the apply stage needs to assist a human
+`EduRec` is read-only; `Reviewer` adds what the review stage needs to assist a human
 reviewer without ever pressing an EduRec action button itself.
 """
 
@@ -75,12 +75,12 @@ SETTLED = """({old, target}) => {
 # The reviewer pressed the panel's Skip, or the state changed: an EduRec button was
 # pressed, or PeopleSoft re-rendered the page on an innocuous interaction.
 SIGNALLED = """(old) => {
-    const apply = window.__edurecApply;
+    const review = window.__edurecReview;
     const state = document.getElementById('ICStateNum');
-    return !!(apply && apply.skipped) || !!(state && state.value !== old);
+    return !!(review && review.skipped) || !!(state && state.value !== old);
 }"""
 SKIPPED = (
-    "() => { const a = window.__edurecApply || {}; return a.skipped ? a.state.skipReason : null; }"
+    "() => { const a = window.__edurecReview || {}; return a.skipped ? a.state.skipReason : null; }"
 )
 SET_BOX = """
     const setBox = (box, value) => {
@@ -101,7 +101,7 @@ INSTALL = (
     "({panel, buttons, cancel, verdicts, prefills, colours, dryRun, comments, fresh}) => {"
     + SET_BOX
     + """
-    const prior = window.__edurecApply;
+    const prior = window.__edurecReview;
     prior?.unhook();
     const hooks = [];
     const listen = (target, type, handler) => {
@@ -110,14 +110,14 @@ INSTALL = (
     };
     const initial = {selected: 'recommended', viewed: 'recommended', scrollTop: 0, skipReason: ''};
     const state = !fresh && prior ? prior.state : initial;
-    const apply = window.__edurecApply = {
+    const review = window.__edurecReview = {
         skipped: false, clicked: null, state,
         unhook: () => hooks.forEach(([t, type, h]) => t.removeEventListener(type, h, true)),
     };
     const box = document.getElementById(comments);
-    document.getElementById('edurec-apply-panel')?.remove();
+    document.getElementById('edurec-review-panel')?.remove();
     const host = document.createElement('div');
-    host.id = 'edurec-apply-panel';
+    host.id = 'edurec-review-panel';
     const root = host.attachShadow({mode: 'open'});
     root.innerHTML = panel;
     document.body.appendChild(host);
@@ -171,7 +171,7 @@ INSTALL = (
     const reason = $('#reason');
     reason.value = state.skipReason;
     reason.oninput = () => { state.skipReason = reason.value; };
-    $('#skip').onclick = () => { apply.skipped = true; };
+    $('#skip').onclick = () => { review.skipped = true; };
     choose(state.selected);
     view(state.viewed);
     const body = $('#body');  // Scroll after the tab is shown, or anchoring shifts the offset.
@@ -204,7 +204,7 @@ INSTALL = (
                     if (!window.confirm(question)) return block(event);
                 }
             }
-            apply.clicked = {id, comment: box ? box.value : null, tab: state.selected};
+            review.clicked = {id, comment: box ? box.value : null, tab: state.selected};
         });
     }
 }"""
@@ -486,7 +486,7 @@ def posted(actions: Collection[str]) -> Callable[[Response], bool]:
     return matches
 
 
-class Applier(EduRec):
+class Reviewer(EduRec):
     """Assists the reviewer on a detail page; the reviewer presses EduRec's own buttons.
 
     How the click is detected: `prepare` injects the decision panel (in a shadow
@@ -500,7 +500,7 @@ class Applier(EduRec):
     fallback when the button matches it), and in a dry run the action buttons
     are disabled and their clicks blocked outright. The selected and viewed
     tabs, the panel's scroll position and a typed skip reason live on
-    `window.__edurecApply.state` and survive a re-install.
+    `window.__edurecReview.state` and survive a re-install.
     `await_action`
     collects the page's responses and waits until either the panel's Skip flag
     is set or `ICStateNum` changes, which only a PeopleSoft postback does. The
@@ -583,7 +583,7 @@ class Applier(EduRec):
         finally:
             frame.page.remove_listener("response", collect)
         form = parse_qs(seen[0].request.post_data or "")
-        hooked = frame.evaluate("() => (window.__edurecApply || {}).clicked")
+        hooked = frame.evaluate("() => (window.__edurecReview || {}).clicked")
         if isinstance(hooked, dict):
             return Clicked(form["ICAction"][0], hooked["comment"], hooked["tab"])
         return Clicked(form["ICAction"][0], form.get(COMMENTS, [None])[0])
