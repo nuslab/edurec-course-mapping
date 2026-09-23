@@ -20,7 +20,7 @@ def keyed(secret: bytes, value: str, length: int) -> str:
 
 
 def request_id(secret: bytes, identity: Identity) -> str:
-    """The request's key: a digest of its seven identity values in canonical JSON."""
+    """The request's key: a digest of its identity in canonical JSON."""
     return keyed(secret, json.dumps(plain(identity), sort_keys=True), 24)
 
 

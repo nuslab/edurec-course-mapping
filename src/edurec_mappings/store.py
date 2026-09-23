@@ -62,6 +62,14 @@ def load(path: Path) -> object:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def read(cls: type[T], path: Path) -> T:
+    """Load a record file; a `ValueError` names the file."""
+    try:
+        return hydrate(cls, load(path))
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from error
+
+
 def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -174,11 +182,7 @@ class Store:
 
     def versions(self) -> Iterator[Version]:
         for path in sorted((self.root / REQUESTS).glob("*/*.yaml")):
-            try:
-                request = hydrate(Request, load(path))
-            except ValueError as error:
-                raise ValueError(f"{path}: {error}") from error
-            yield Version(request, path.stem)
+            yield Version(read(Request, path), path.stem)
 
     def latest(self) -> list[Version]:
         """The newest version of every request, oldest first, sibling parts consecutive."""

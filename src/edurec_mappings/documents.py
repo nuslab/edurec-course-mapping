@@ -155,17 +155,13 @@ def fetch_document(url: str, fetch: Fetcher, render: Renderer | None = None) -> 
     except Exception as error:
         why = str(error).splitlines()[0] if str(error) else type(error).__name__
         return LinkedDocument(url, error=why)
-    text, record.text = record.text or "", None
-    record.bytes = len(text.encode())
-    if not text:
-        record.status, record.error = "empty", "No extractable text"
-    elif record.bytes > MAX_TEXT_BYTES:
-        record.status = "too_large"
-        record.error = f"Extracted text exceeds {MAX_TEXT_BYTES} bytes"
-    else:
-        record.status, record.text = "fetched", text
-        record.path = f"{DOCUMENTS}/{document_name(url)}"
-    return record
+    record.bytes = len((record.text or "").encode())
+    if not record.text:
+        return replace(record, status="empty", error="No extractable text", text=None)
+    if record.bytes > MAX_TEXT_BYTES:
+        too_large = f"Extracted text exceeds {MAX_TEXT_BYTES} bytes"
+        return replace(record, status="too_large", error=too_large, text=None)
+    return replace(record, status="fetched", path=f"{DOCUMENTS}/{document_name(url)}")
 
 
 def fetch_documents(
@@ -185,11 +181,7 @@ def fetch_documents(
 
 
 def scrape(requests: list[Request], fetch: Fetcher, render: Renderer | None = None) -> None:
-    """Stage 2: fetch every URL in the collected requests and attach the text to them.
-
-    Each URL is fetched once per export. With `render`, HTML pages that arrive as
-    script shells are re-read in a browser page.
-    """
+    """Fetch every URL in the requests once and attach the documents to them."""
     cache: dict[str, LinkedDocument] = {}
     for index, request in enumerate(requests, 1):
         fetch_documents(request, fetch, cache, render)

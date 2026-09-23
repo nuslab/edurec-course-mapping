@@ -7,8 +7,8 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from edurec_mappings.documents import direct_url, document_name, fetch_documents, find_urls
 from edurec_mappings.models import Fetched, LinkedDocument
-from edurec_mappings.parse import detail, expand_action
-from tests.test_parse import fixture, tag
+from edurec_mappings.parse import detail
+from tests.test_parse import fixture
 
 
 def pdf_bytes(text: str) -> bytes:
@@ -108,14 +108,6 @@ class DocumentTests(unittest.TestCase):
         (document,) = request.linked_documents or []
         self.assertEqual((document.status, document.error), ("failed", "network down"))
 
-    def test_expand_action_only_when_larger_view_is_offered(self) -> None:
-        soup = fixture("main.html")
-        self.assertIsNone(expand_action(soup), "Snapshot already shows 100 rows")
-        tag(soup, "PTS_CFG_CL_STD_RSL$hviewall$0", "a").string = "View 100"
-        self.assertEqual(expand_action(soup), "PTS_CFG_CL_STD_RSL$hviewall$0")
-        tag(soup, "PTS_CFG_CL_STD_RSL$hviewall$0", "a").string = "View All"
-        self.assertEqual(expand_action(soup), "PTS_CFG_CL_STD_RSL$hviewall$0")
-
     def test_script_shells_are_rendered_when_a_renderer_is_given(self) -> None:
         request = detail(fixture("individual.html"))
         request.partner_course.other_information = (
@@ -152,7 +144,3 @@ class DocumentTests(unittest.TestCase):
         broken = docs["broken-shell"]
         self.assertEqual((broken.status, broken.text), ("fetched", "Loading"))
         self.assertIn("Week one outline", docs["full"].text or "")
-
-
-if __name__ == "__main__":
-    unittest.main()

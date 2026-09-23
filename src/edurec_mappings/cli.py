@@ -146,7 +146,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     if "timeout" in args:
-        args.timeout_ms = args.timeout * 1000  # Playwright expects milliseconds.
+        args.timeout_ms = args.timeout * 1000
     if args.command == "export":
         try:
             # An explicit term overrides the configured list.
@@ -317,8 +317,12 @@ def hold_open(args: argparse.Namespace, message: str) -> None:
 
 def collect(context: BrowserContext, args: argparse.Namespace, data: Export) -> None:
     """Extract the matching requests into `data` and, with --scrape-urls, their documents."""
-    connect(context, args)
-    context.remove_listener("dialog", manual_dialog)
+    # Dialogs are left to the user while logging in; afterwards Playwright dismisses them.
+    context.on("dialog", manual_dialog)
+    try:
+        connect(context, args)
+    finally:
+        context.remove_listener("dialog", manual_dialog)
     site = EduRec(context, args.timeout_ms)
     export(site, data, reassign_id=args.reassign_id.strip(), rows=args.rows, terms=args.terms)
     print(f"{data.status}: {len(data.requests)} requests collected", flush=True)
@@ -336,7 +340,6 @@ def persist(data: Export, args: argparse.Namespace) -> None:
 
 def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
     """Collect, then store what was collected even when collection stopped early."""
-    context.on("dialog", manual_dialog)
     data = Export()
     try:
         try:
@@ -346,8 +349,6 @@ def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
     except Exception as error:
         hold_open(args, f"Collection stopped: {error}.")
         raise
-    finally:
-        context.remove_listener("dialog", manual_dialog)
 
 
 def run_review(context: BrowserContext, args: argparse.Namespace) -> None:

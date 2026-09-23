@@ -179,7 +179,3 @@ class StoreTests(unittest.TestCase):
         changed.comments = "edited"
         self.store.save([changed])
         self.assertIn(added[1].request_id, [v.request_id for v in self.store.pending()])
-
-
-if __name__ == "__main__":
-    unittest.main()

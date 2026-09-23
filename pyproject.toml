@@ -14,7 +14,7 @@ dependencies = [
     "PyYAML>=6,<7",
     "playwright>=1.40,<2",
     "pydantic>=2.7,<3",
-    "pypdf>=4,<7",
+    "pypdf[crypto]>=4,<7",
 ]
 
 [project.optional-dependencies]

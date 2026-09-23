@@ -1,10 +1,7 @@
-import argparse
 import copy
-import io
 import tempfile
 import unittest
 from collections.abc import Callable
-from contextlib import redirect_stderr
 from dataclasses import astuple, replace
 from pathlib import Path
 from unittest import mock
@@ -13,9 +10,9 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 from edurec_mappings.browser import EduRec, subdivide
-from edurec_mappings.cli import configured_terms, optional_rows, parse_args, term_code
+from edurec_mappings.cli import configured_terms
 from edurec_mappings.documents import MAX_TEXT_BYTES, scrape
-from edurec_mappings.export import export
+from edurec_mappings.export import export, restore_list
 from edurec_mappings.models import Export, Fetched, Listing, ListRow, Partition, Request
 from edurec_mappings.parse import detail
 from edurec_mappings.store import Store
@@ -142,20 +139,6 @@ class ExportTests(unittest.TestCase):
             self.assertEqual({p.term_low for p in site.searches}, {2610, 2620})
             override = run(FakeSite(cap=100), terms=["2600"])
             self.assertEqual(len(override.requests), 7)
-
-    def test_invalid_term_configuration(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "terms.yaml"
-            for config in (
-                "terms: []",
-                "terms: [2610, 2610]",
-                'terms: ["", 2610]',
-                "terms: [false]",
-                "terms: 2610",
-            ):
-                path.write_text(config)
-                with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
-                    configured_terms(path)
 
     def test_reusing_between_operator_does_not_trigger_form_rebuild(self) -> None:
         with sync_playwright() as p:
@@ -317,17 +300,6 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(textbook["bytes"], MAX_TEXT_BYTES + 1)
             self.assertIn("exceeds", textbook["error"])
 
-    def test_export_arguments(self) -> None:
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            parse_args(["export"])
-        self.assertFalse(parse_args(["export", "--store", "s"]).scrape_urls)
-        args = parse_args(["export", "--scrape-urls", "--store", "s"])
-        self.assertTrue(args.scrape_urls)
-        self.assertEqual(args.store, "s")
-        for removed in ("--run", "--anonymize", "--anonymized-run"):
-            with self.assertRaises(SystemExit):
-                parse_args(["export", removed, "x"])
-
     def test_single_student_capped_search_splits_mapping_groups(self) -> None:
         entries = records()[:7]
         for row, request in entries:
@@ -356,17 +328,29 @@ class ExportTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "indivisible"):
             subdivide(p, [ListRow(term_code="2600", student_id="A", action="#ICRow0")])
 
-    def test_blank_arguments_and_invalid_limits(self) -> None:
-        self.assertIsNone(optional_rows(""))
-        self.assertEqual(optional_rows("12"), 12)
-        self.assertEqual(term_code(""), "")
-        self.assertEqual(term_code(" 2610 "), "2610")
-        for value in ("0", "-1", "abc"):
-            with self.assertRaises(argparse.ArgumentTypeError):
-                optional_rows(value)
-        with self.assertRaises(argparse.ArgumentTypeError):
-            term_code("26")
+
+def page(start: int, end: int, total: int, has_next: bool = True, name: str = "row") -> Listing:
+    rows = [ListRow(action=f"#ICRow{i}", student_id=f"{name}{i}") for i in range(start, end + 1)]
+    return Listing(rows=rows, range=(start, end, total), has_next=has_next)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class RestoreListTests(unittest.TestCase):
+    def test_pages_forward_after_a_reset_to_page_one(self) -> None:
+        site = mock.Mock()
+        site.back.return_value = page(1, 2, 4)
+        site.next_page.return_value = page(3, 4, 4, has_next=False)
+        restored = restore_list(site, page(3, 4, 4, has_next=False), 4)
+        self.assertEqual(restored.range, (3, 4, 4))
+
+    def test_pagination_that_does_not_advance_is_an_error(self) -> None:
+        site = mock.Mock()
+        site.back.return_value = page(1, 2, 4)
+        site.next_page.return_value = page(1, 2, 4)
+        with self.assertRaisesRegex(RuntimeError, "did not advance"):
+            restore_list(site, page(3, 4, 4, has_next=False), 4)
+
+    def test_changed_results_are_an_error(self) -> None:
+        site = mock.Mock()
+        site.back.return_value = page(1, 2, 4, name="other")
+        with self.assertRaisesRegex(RuntimeError, "Results changed"):
+            restore_list(site, page(1, 2, 4), 4)

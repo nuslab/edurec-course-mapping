@@ -1,18 +1,18 @@
-"""Orchestration in `cli` and `export.restore_list`, driven through fakes."""
-
 import argparse
 import io
+import sqlite3
+import tempfile
 import unittest
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from playwright.sync_api import Error as PlaywrightError
 
 from edurec_mappings import cli
 from edurec_mappings.browser import COMPONENT, ApprovalNotLoadedError
-from edurec_mappings.export import restore_list
-from edurec_mappings.models import Export, LinkedDocument, Listing, ListRow, Request
+from edurec_mappings.models import Export, LinkedDocument, Request
 from tests.test_export import records
 
 NOT_LOADED = ApprovalNotLoadedError(
@@ -249,6 +249,49 @@ class ParseArgsTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 cli.parse_args(argv)
 
+    def test_export_arguments(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.parse_args(["export"])
+        self.assertFalse(cli.parse_args(["export", "--store", "s"]).scrape_urls)
+        args = cli.parse_args(["export", "--scrape-urls", "--store", "s"])
+        self.assertTrue(args.scrape_urls)
+        self.assertEqual(args.store, "s")
+
+    def test_review_arguments(self) -> None:
+        args = cli.parse_args(
+            ["review", "--store", "s", "--request-id", "a", "--verdict", "reject"]
+        )
+        self.assertEqual((args.request_ids, args.verdicts), (["a"], ["reject"]))
+        self.assertFalse(args.dry_run)
+        self.assertEqual(args.timeout_ms, 60000)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.parse_args(["review", "--store", "s", "--verdict", "maybe"])
+
+    def test_blank_arguments_and_invalid_limits(self) -> None:
+        self.assertIsNone(cli.optional_rows(""))
+        self.assertEqual(cli.optional_rows("12"), 12)
+        self.assertEqual(cli.term_code(""), "")
+        self.assertEqual(cli.term_code(" 2610 "), "2610")
+        for value in ("0", "-1", "abc"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cli.optional_rows(value)
+        with self.assertRaises(argparse.ArgumentTypeError):
+            cli.term_code("26")
+
+    def test_invalid_term_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "terms.yaml"
+            for config in (
+                "terms: []",
+                "terms: [2610, 2610]",
+                'terms: ["", 2610]',
+                "terms: [false]",
+                "terms: 2610",
+            ):
+                path.write_text(config)
+                with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+                    cli.configured_terms(path)
+
 
 class RenderTests(unittest.TestCase):
     def test_fetch_prints_title_and_text_and_closes_the_browser(self) -> None:
@@ -265,28 +308,19 @@ class RenderTests(unittest.TestCase):
         browser.close.assert_called_once()
 
 
-def page(start: int, end: int, total: int, has_next: bool = True, name: str = "row") -> Listing:
-    rows = [ListRow(action=f"#ICRow{i}", student_id=f"{name}{i}") for i in range(start, end + 1)]
-    return Listing(rows=rows, range=(start, end, total), has_next=has_next)
-
-
-class RestoreListTests(unittest.TestCase):
-    def test_pages_forward_after_a_reset_to_page_one(self) -> None:
-        site = mock.Mock()
-        site.back.return_value = page(1, 2, 4)
-        site.next_page.return_value = page(3, 4, 4, has_next=False)
-        restored = restore_list(site, page(3, 4, 4, has_next=False), 4)
-        self.assertEqual(restored.range, (3, 4, 4))
-
-    def test_pagination_that_does_not_advance_is_an_error(self) -> None:
-        site = mock.Mock()
-        site.back.return_value = page(1, 2, 4)
-        site.next_page.return_value = page(1, 2, 4)
-        with self.assertRaisesRegex(RuntimeError, "did not advance"):
-            restore_list(site, page(3, 4, 4, has_next=False), 4)
-
-    def test_changed_results_are_an_error(self) -> None:
-        site = mock.Mock()
-        site.back.return_value = page(1, 2, 4, name="other")
-        with self.assertRaisesRegex(RuntimeError, "Results changed"):
-            restore_list(site, page(1, 2, 4), 4)
+class ForgetDownloadsTests(unittest.TestCase):
+    def test_clears_the_history_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory)
+            history = profile / "Default" / "History"
+            history.parent.mkdir()
+            with sqlite3.connect(history) as connection:
+                for table in cli.DOWNLOAD_TABLES:
+                    connection.execute(f"CREATE TABLE {table} (id INTEGER)")
+                    connection.execute(f"INSERT INTO {table} VALUES (1)")
+            cli.forget_downloads(profile)
+            with sqlite3.connect(history) as connection:
+                for table in cli.DOWNLOAD_TABLES:
+                    count = connection.execute(f"SELECT count(*) FROM {table}").fetchone()
+                    self.assertEqual(count, (0,))
+            cli.forget_downloads(profile / "missing")

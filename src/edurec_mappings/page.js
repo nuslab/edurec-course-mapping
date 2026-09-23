@@ -44,6 +44,7 @@
             target.addEventListener(type, handler, true);
             hooks.push([target, type, handler]);
         };
+        // The panel's state outlives a PeopleSoft re-render; only a fresh prepare resets it.
         const initial = {selected: 'recommended', viewed: 'recommended', scrollTop: 0, skipReason: ''};
         const state = !fresh && prior ? prior.state : initial;
         const current = window.__edurecReview = {
@@ -52,6 +53,7 @@
         };
         const box = document.getElementById(comments);
         document.getElementById('edurec-review-panel')?.remove();
+        // A shadow root keeps the page's CSS off the panel.
         const host = document.createElement('div');
         host.id = 'edurec-review-panel';
         const root = host.attachShadow({mode: 'open'});

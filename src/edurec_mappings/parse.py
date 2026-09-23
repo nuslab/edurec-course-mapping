@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Callable
 from typing import TypeVar
@@ -38,16 +36,10 @@ def text(node: PageElement | None) -> str | None:
     return value if value and value != "-" else None
 
 
-def digest(value: dict[str, object]) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
-
-
-def expand_action(soup: BeautifulSoup) -> str | None:
-    """Return the grid's view-toggle action while it still offers a larger page size."""
+def can_expand(soup: BeautifulSoup) -> bool:
+    """Whether the grid's view toggle still offers a larger page size."""
     link = soup.find("a", id=VIEW_ALL)
-    if link is not None and re.fullmatch(r"View\s+(100|All)", text(link) or "", re.I):
-        return VIEW_ALL
-    return None
+    return link is not None and bool(re.fullmatch(r"View\s+(100|All)", text(link) or "", re.I))
 
 
 def listing(soup: BeautifulSoup) -> Listing:

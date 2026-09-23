@@ -6,6 +6,7 @@ reviewer without ever pressing an EduRec action button itself.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Collection
 from dataclasses import replace
@@ -35,7 +36,7 @@ from .models import (
     display,
     plain,
 )
-from .parse import DETAIL, GRID, NEXT, VIEW_ALL, detail, digest, expand_action, listing
+from .parse import DETAIL, GRID, NEXT, VIEW_ALL, can_expand, detail, listing
 
 PREFIX = "N_EXSP_MOD_VW2_"
 SEARCH = "PTS_CFG_CL_WRK_PTS_SRCH_BTN"
@@ -98,6 +99,10 @@ class Install(TypedDict):
 
 class ApprovalNotLoadedError(RuntimeError):
     """No frame shows the Course Mapping Approval form, e.g. only the dashboard is open."""
+
+
+class NotInQueueError(RuntimeError):
+    """The request's identity search found no row: it left the approval queue."""
 
 
 def mapping_frame(context: BrowserContext) -> Frame:
@@ -169,7 +174,7 @@ def validate_rows(partition: Partition, rows: list[ListRow]) -> None:
 
 def list_identity(page: Listing) -> str:
     """Fingerprint a results page by its displayed values; row actions change per render."""
-    return digest({**plain(page), "rows": [row.cells() for row in page.rows]})
+    return json.dumps({**plain(page), "rows": [row.cells() for row in page.rows]}, sort_keys=True)
 
 
 class EduRec:
@@ -247,8 +252,7 @@ class EduRec:
             self.control(field + "$to").fill(str(high))
 
     def search(self, partition: Partition) -> Listing:
-        # Clear stale values repopulated by opening details. Blank arguments must
-        # not silently retain a prior student's, institution's or status filter.
+        # Opening a detail repopulates the criteria; clear those this search leaves blank.
         for field in FIELDS:
             if field in RANGE_FIELDS:
                 continue
@@ -279,7 +283,7 @@ class EduRec:
 
     def read_list(self, expand: bool = False) -> Listing:
         soup = self.soup()
-        if expand and expand_action(soup):
+        if expand and can_expand(soup):
             # Show 100 rows per page so each detail round trip restores fewer pages.
             self.transition(VIEW_ALL, target=GRID)
             soup = self.soup()
@@ -349,10 +353,6 @@ class EduRec:
         return self.request(found.rows[0])
 
 
-class NotInQueueError(RuntimeError):
-    """The request's identity search found no row: it left the approval queue."""
-
-
 def posted(actions: Collection[str]) -> Callable[[Response], bool]:
     """Match the PeopleSoft postback whose `ICAction` is one of `actions`."""
 
@@ -369,31 +369,14 @@ def posted(actions: Collection[str]) -> Callable[[Response], bool]:
 class Reviewer(EduRec):
     """Assists the reviewer on a detail page; the reviewer presses EduRec's own buttons.
 
-    How the click is detected: `prepare` injects the proposal panel (in a shadow
-    root, so page CSS cannot restyle it) and a capture-phase click hook on the
-    five buttons. Clicking a panel tab only previews its pane; the tab whose
-    "Select" button was pressed (it then reads "Selected" and is disabled)
-    decides which comment is in the box and which button is outlined. The hook
-    only observes: it records the button id and the comment box's value, asks
-    for confirmation when
-    the verdict differs from the selected tab's (offering to select the
-    fallback when the button matches it), and in a dry run the action buttons
-    are disabled and their clicks blocked outright. The selected and viewed
-    tabs, the panel's scroll position and a typed skip reason live on
-    `window.__edurecReview.state` and survive a re-install.
-    `await_action`
-    collects the page's responses and waits until either the panel's Skip flag
-    is set or `ICStateNum` changes, which only a PeopleSoft postback does. The
-    posted `ICAction` of the collected response, not the hook, says which button
-    was pressed, so nothing is missed when the postback races the hook's report,
-    and a dismissed unsaved-changes dialog on Cancel leaves the wait intact.
+    `prepare` injects the panel and a click hook on the action buttons (see `page.js`).
+    `await_action` waits for the panel's Skip or an `ICStateNum` change. The posted
+    `ICAction`, not the hook, says which button was pressed, so a postback that races
+    the hook is not missed.
 
-    PeopleSoft also re-renders the page on innocuous interactions (collapsing a
-    section, sorting a grid, tabbing out of a changed field), which strips the
-    panel, the hook and the dry-run state. A state change without a recognised
-    post is therefore not an error: while the detail still shows as pending the
-    panel and hook are re-installed (the comment box keeps its current text) and
-    the wait resumes; once the detail is gone the outcome is a `Skipped`.
+    PeopleSoft also re-renders the page on innocuous interactions, such as collapsing a
+    section, which strips the panel and hook. While the detail is still pending they are
+    re-installed and the wait resumes; once it is gone the request is skipped.
     """
 
     prior_comment: str = ""
@@ -422,7 +405,6 @@ class Reviewer(EduRec):
         run(frame, "install", **self.install, fresh=True)
 
     def comment(self, value: str) -> None:
-        # No inline onchange: dispatch the events PeopleSoft's delegated handlers listen for.
         run(self.frame(), "comment", id=COMMENTS, value=value)
 
     def pending_detail(self) -> bool:
@@ -451,7 +433,7 @@ class Reviewer(EduRec):
                 if skipped is not None:
                     self.comment(self.prior_comment)
                     why = str(skipped).strip()
-                    return Skipped(f"skipped by the reviewer: {why}" if why else SKIPPED)
+                    return Skipped(f"{SKIPPED}: {why}" if why else SKIPPED)
                 if seen:
                     self.settle(seen[0], previous)
                     break

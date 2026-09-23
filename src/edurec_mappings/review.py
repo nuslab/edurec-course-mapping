@@ -1,14 +1,6 @@
-"""Stage 4: show each proposal to the reviewer on its EduRec detail page and log what they did.
+"""Show each proposal on its EduRec detail page and record what the reviewer submitted.
 
-The program reopens a request, pre-fills the comment box with the proposal's
-comment and injects a panel with the proposal. The reviewer presses one of
-EduRec's own buttons (or the panel's Skip); the program never does. After the
-postback it verifies that the status left "Pending Approval" (a request that
-disappeared from the approval queue counts as verified) and writes an `Outcome`
-file to `outcomes/<request_id>/<hash>.yaml`, as it does for a request that left the
-queue before it was opened; skips and dry runs write nothing.
-
-Only clicks made while the panel is shown are observed and logged.
+The reviewer presses EduRec's own buttons or the panel's Skip; the program never does.
 """
 
 from __future__ import annotations
@@ -17,6 +9,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from functools import partial
+from operator import attrgetter
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
@@ -37,10 +30,9 @@ from .models import (
     Request,
     Skipped,
     display,
-    hydrate,
     plain,
 )
-from .store import OUTCOMES, PROPOSALS, Store, Version, dump, load, now, write_atomic
+from .store import OUTCOMES, PROPOSALS, Store, Version, dump, now, read, write_atomic
 
 UNVERIFIED = "submission observed, not yet verified"
 """Reason on the provisional entry written the moment the reviewer's click is seen."""
@@ -101,13 +93,6 @@ class Item:
     """The request version's content hash, which names its proposal and outcome files."""
 
 
-def load_proposal(path: Path) -> Proposal:
-    try:
-        return hydrate(Proposal, load(path))
-    except ValueError as error:
-        raise ValueError(f"{path}: {error}") from error
-
-
 def submitted(outcomes: Mapping[str, Outcome]) -> dict[str, Outcome]:
     """The outcomes that record a submitted verdict, not a request that left the queue."""
     return {key: entry for key, entry in outcomes.items() if entry.action != NOT_IN_QUEUE}
@@ -124,7 +109,7 @@ def load_outcomes(store: Store, latest: Iterable[Version]) -> dict[str, Outcome]
     for version in latest:
         path = store.file(OUTCOMES, version.request_id, version.hash)
         if path.exists():
-            outcomes[version.request_id] = hydrate(Outcome, load(path))
+            outcomes[version.request_id] = read(Outcome, path)
     return outcomes
 
 
@@ -147,7 +132,7 @@ def load_queue(store: Store, latest: Iterable[Version]) -> list[Item]:
             version.request,
             identity=replace(version.request.identity, student_id=identities[request_id]),
         )
-        items.append(Item(load_proposal(path), request, version.hash))
+        items.append(Item(read(Proposal, path), request, version.hash))
     return items
 
 
@@ -168,9 +153,7 @@ def stale_reason(exported: Request, live: Request) -> str | None:
     if live.status != PENDING:
         return f"live status is {live.status!r}, not {PENDING!r}"
     for field in FRESHNESS_FIELDS:
-        before, after = exported, live
-        for part in field.split("."):
-            before, after = getattr(before, part), getattr(after, part)
+        before, after = attrgetter(field)(exported), attrgetter(field)(live)
         if before != after:
             return f"{field} changed from {before!r} to {after!r}"
     return None
@@ -240,8 +223,6 @@ def review_item(
     try:
         live = site.open(exported)
     except NotInQueueError:
-        live = None
-    if live is None:
         return Outcome(action=NOT_IN_QUEUE, comment=None, recorded_at=now())
     reason = stale_reason(exported, live) or comment_problem(proposal.comment)
     if reason:
@@ -278,14 +259,9 @@ def review(
 ) -> dict[str, Outcome | Skipped]:
     """Walk the queue with the reviewer; returns what happened this session, by request id.
 
-    A submitted verdict, or a request that already left the approval queue, is
-    written to `outcomes/<request_id>/<hash>.yaml` (except in a dry run) before the
-    next request is opened, which closes that request version; skips are offered
-    again next session. A provisional outcome is written the moment a click is seen:
-    an error after the click leaves the verdict on record with the error as reason,
-    then the session stops. A submission whose status did not leave "Pending
-    Approval" is stored with its verdict and a reason, then the session stops: it
-    is never retried.
+    Each outcome is written before the next request is opened, which closes that
+    request version; skips are offered again next session. A submission that could
+    not be verified is stored with a reason and stops the session.
     """
     store = Store(root)
     latest = store.latest()

@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup, Tag
 
 from edurec_mappings.anonymize import request_id
 from edurec_mappings.models import LIST_COLUMNS, plain
-from edurec_mappings.parse import GRID, detail, listing
+from edurec_mappings.parse import GRID, VIEW_ALL, can_expand, detail, listing
 from edurec_mappings.store import Store
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -100,19 +100,23 @@ class ExtractionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             listing(fixture("individual.html"))
 
+    def test_single_row_counter_has_no_range_dash(self) -> None:
+        html = (
+            '<div id="win0divPTS_CFG_CL_STD_RSLGP$0"><span class="PSGRIDCOUNTER">1 of 1</span>'
+            f'</div><table id="{GRID}"><tr onclick="x(\'#ICRow0\')">'
+            + "<td>a</td>" * 14
+            + "</tr></table>"
+        )
+        page = listing(BeautifulSoup(html, "html.parser"))
+        self.assertEqual(page.range, (1, 1, 1))
+        self.assertEqual(len(page.rows), 1)
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-def test_single_row_counter_has_no_range_dash() -> None:
-    html = (
-        '<div id="win0divPTS_CFG_CL_STD_RSLGP$0"><span class="PSGRIDCOUNTER">1 of 1</span></div>'
-        f'<table id="{GRID}"><tr onclick="x(\'#ICRow0\')">' + "<td>a</td>" * 14 + "</tr></table>"
-    )
-    page = listing(BeautifulSoup(html, "html.parser"))
-    assert page.range == (1, 1, 1)
-    assert len(page.rows) == 1
+    def test_expands_only_when_a_larger_view_is_offered(self) -> None:
+        soup = fixture("main.html")
+        self.assertFalse(can_expand(soup), "Snapshot already shows 100 rows")
+        for label in ("View 100", "View All"):
+            tag(soup, VIEW_ALL, "a").string = label
+            self.assertTrue(can_expand(soup))
 
 
 class ListColumnsTests(unittest.TestCase):

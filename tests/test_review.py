@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import sqlite3
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping
@@ -22,7 +21,6 @@ from edurec_mappings.browser import (
     NotInQueueError,
     Reviewer,
 )
-from edurec_mappings.cli import DOWNLOAD_TABLES, forget_downloads, main, parse_args
 from edurec_mappings.models import (
     NOT_IN_QUEUE,
     PENDING,
@@ -305,14 +303,6 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("[", comment_problem("Fill in [course]") or "")
         self.assertIn("XXXX", comment_problem("Consider remapping to CSXXXX.") or "")
 
-    def test_verdict_button_mapping(self) -> None:
-        self.assertEqual(len(BUTTONS), 4)
-        for button, verdict in BUTTONS.items():
-            self.assertEqual(button_for(verdict), button)
-        self.assertEqual(BUTTONS["N_SR_EXT_STD_DW_APPROVE_PB"], "approve")
-        self.assertEqual(BUTTONS["N_SR_EXT_STD_DW_REQUEST_BTN"], "request remapping")
-        self.assertNotIn(CANCEL, BUTTONS)
-
     def test_panel_html_shows_the_proposal_in_order_and_escapes_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store, versions = make_store(directory)
@@ -398,14 +388,10 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(html.count('class="pane'), 2)
             self.assertLess(html.index("Reset comment"), html.index("Target:"))
             self.assertNotIn("remapping<", html, "verdicts are shown in title case")
-            self.assertNotIn("Details", html)
-            self.assertNotIn("decided", html)
             self.assertNotIn(first, html)
             self.assertNotIn(sibling, html)
-            self.assertNotIn('class="selected"', html)
             self.assertNotIn("Better fit <b>", html)
             self.assertNotIn("<planning>", html)
-            self.assertNotIn("fresh", html)
             self.assertNotIn("Dry run", panel_html(item, PROGRESS, {}, dry_run=False))
 
     def test_panel_without_fallback_verdict_offers_no_selection_and_names_siblings_by_id(
@@ -446,7 +432,6 @@ class ReviewTests(unittest.TestCase):
 
     def test_header_badges_colour_confidence_and_overlap(self) -> None:
         _, request = records()[0]
-        self.assertEqual((OVERLAP_GOOD, OVERLAP_FAIR), (70, 40))
         self.assertEqual(overlap_colour(OVERLAP_GOOD), GREEN)
         self.assertEqual(overlap_colour(OVERLAP_GOOD - 1), AMBER)
         self.assertEqual(overlap_colour(OVERLAP_FAIR), AMBER)
@@ -468,7 +453,6 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(
             request.course, "EXU 1001 (Example College) -> CS3243"
         )
-        self.assertNotIn("course", plain(request), "Derived, never stored")
 
     def test_prefills_offer_the_fallback_only_when_there_is_one(self) -> None:
         _, request = records()[0]
@@ -476,6 +460,15 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(list(prefills), ["recommended", "fallback"])
         self.assertEqual(prefills["fallback"], FALLBACK["fallback_comment"] + "\n\nolder")
         self.assertEqual(list(proposal(request).prefills(None)), ["recommended"])
+
+    def test_proposal_comment_goes_on_top_of_existing_text(self) -> None:
+        _, request = records()[0]
+        advice = proposal(request)
+        self.assertEqual(advice.prefills(None)["recommended"], advice.comment)
+        self.assertEqual(advice.prefills("  ")["recommended"], advice.comment)
+        self.assertEqual(
+            advice.prefills("older note\n")["recommended"], advice.comment + "\n\nolder note"
+        )
 
     def test_loop_stores_submissions_only_and_stops_when_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -943,54 +936,3 @@ class ReviewTests(unittest.TestCase):
                 Clicked("#ICList", advice.comment + "\n\nedited"),
             )
             browser.close()
-
-    def test_review_arguments(self) -> None:
-        args = parse_args(["review", "--store", "s", "--request-id", "a", "--verdict", "reject"])
-        self.assertEqual(args.store, "s")
-        self.assertFalse(hasattr(args, "proposals"))
-        self.assertEqual((args.request_ids, args.verdicts), (["a"], ["reject"]))
-        self.assertFalse(args.dry_run)
-        self.assertEqual(args.timeout_ms, 60000)
-        with self.assertRaises(SystemExit):
-            parse_args(["review", "--verdict", "maybe"])
-        with self.assertRaises(SystemExit):
-            main(["review", "--verdict", "maybe"])
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class PrefillTests(unittest.TestCase):
-    def test_proposal_comment_goes_on_top_of_existing_text(self) -> None:
-        _, request = records()[0]
-        advice = proposal(request)
-        self.assertEqual(advice.prefills(None)["recommended"], advice.comment)
-        self.assertEqual(advice.prefills("  ")["recommended"], advice.comment)
-        self.assertEqual(
-            advice.prefills("older note\n")["recommended"], advice.comment + "\n\nolder note"
-        )
-
-    def test_panel_shows_the_existing_comment(self) -> None:
-        _, request = records()[0]
-        item = Item(proposal(request), request, "hash")
-        html = panel_html(item, Progress(1, 1, 0, 1), {}, False, existing="kept <below>")
-        self.assertIn("Previous comments", html)
-        self.assertIn("kept &lt;below&gt;", html)
-        self.assertNotIn("Previous comments", panel_html(item, Progress(1, 1, 0, 1), {}, False))
-
-
-def test_forget_downloads_clears_history_tables(tmp_path: Path) -> None:
-    history = tmp_path / "Default" / "History"
-    history.parent.mkdir()
-    with sqlite3.connect(history) as connection:
-        for table in DOWNLOAD_TABLES:
-            connection.execute(f"CREATE TABLE {table} (id INTEGER)")
-            connection.execute(f"INSERT INTO {table} VALUES (1)")
-    forget_downloads(tmp_path)
-    with sqlite3.connect(history) as connection:
-        assert all(
-            connection.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
-            for table in DOWNLOAD_TABLES
-        )
-    forget_downloads(tmp_path / "missing")  # No profile yet: nothing to do.

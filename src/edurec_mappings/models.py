@@ -1,16 +1,7 @@
-"""Typed records for an export, the mapping requests it stores and the proposals on them.
+"""Records for requests, proposals and outcomes, and their strict YAML round trip.
 
-Every record serialises to plain dictionaries and lists through `plain`, so the
-YAML output keeps the same key names as the model fields.
-
-The records fall into three groups:
-
-- `Request` and its parts are what a course mapping decision needs: the partner
-  and NUS course evidence, the student context, prior review comments, linked
-  documents, and the identity that reopens the request in EduRec.
-- `Export` is one export in memory: how far it got and the requests it collected.
-- `Proposal` is the AI course mapping advisor's verdict on one request version, and
-  `Outcome` records what the human reviewer then did with it in EduRec.
+`plain` and `hydrate` convert every record to and from plain dictionaries whose
+keys are the field names.
 """
 
 from __future__ import annotations
@@ -29,9 +20,7 @@ DocumentKind = Literal["pdf", "html", "text"]
 Verdict = Literal["approve", "reject", "request remapping", "request for more information"]
 Confidence = Literal["high", "medium", "low"]
 Action = Literal[Verdict, "not in approval queue"]
-"""What a stored outcome records: the verdict submitted, or that the request left the queue."""
 Tab = Literal["recommended", "fallback"]
-"""The panel's comment tabs; the fallback exists only when the proposal names one."""
 
 SCHEMA_VERSION = 7
 """Version of the stored request files."""
@@ -59,11 +48,10 @@ def display(value: str) -> str:
 
 T = TypeVar("T")
 ADAPTERS: dict[type, TypeAdapter[Any]] = {}
-"""One adapter per record type; `Any` because the dict holds every type's adapter."""
 
 
 def adapter(kind: type[T]) -> TypeAdapter[T]:
-    """The validator and serialiser for a record type, built once: building takes milliseconds."""
+    """The record type's validator and serialiser, built once per type."""
     if kind not in ADAPTERS:
         ADAPTERS[kind] = TypeAdapter(kind)
     return ADAPTERS[kind]
@@ -72,19 +60,19 @@ def adapter(kind: type[T]) -> TypeAdapter[T]:
 def plain(record: object, exclude: set[str] | None = None) -> dict[str, object]:
     """A record as the JSON-compatible dictionary that YAML writers accept.
 
-    The record's own type drives serialisation, so `Field(exclude=True)` fields are
-    dropped; convert a list of records item by item, since an untyped list keeps them.
+    `Field(exclude=True)` fields are dropped only when the record's own type drives
+    serialisation, so convert a list of records item by item.
     """
     data = adapter(type(record)).dump_python(record, mode="json", exclude=exclude)
     return cast("dict[str, object]", data)
 
 
 def hydrate(cls: type[T], data: object) -> T:
-    """Rebuild a record from its `plain` form, as strictly as JSON: no coercion, no unknown keys.
+    """Rebuild a record from its `plain` form: no coercion, no unknown keys.
 
-    Validation runs in JSON mode because strict Python mode accepts only instances
-    of a dataclass, never a mapping. Raises `ValueError` (`pydantic.ValidationError`
-    is one) for invalid content or a YAML value JSON cannot hold, such as a date.
+    Strict Python mode accepts only dataclass instances, never a mapping, hence the
+    JSON round trip. Raises `ValueError` for invalid content or a YAML value that JSON
+    cannot hold, such as a date.
     """
     try:
         payload = json.dumps(data)
@@ -188,7 +176,7 @@ class Listing:
 
 @dataclass
 class Identity:
-    """What identifies a request in EduRec; `request_id` is a keyed digest of these seven values.
+    """What identifies a request in EduRec; `request_id` is a keyed digest of it.
 
     Reopening a request searches by student ID, term code, mapping number and
     sequence; the other fields are context that EduRec shows on the detail page.
@@ -211,8 +199,7 @@ class Identity:
 
 @dataclass
 class Student:
-    """Programme context. Mappings are evaluated programme-agnostically, so this only
-    informs concerns and remapping targets."""
+    """The student's programme."""
 
     academic_program: str | None
     academic_plan: str | None
@@ -258,11 +245,7 @@ class NusCourse:
 
 @dataclass
 class LinkedDocument:
-    """A URL found in the course details and what could be read from it.
-
-    The extracted text is written to `path`, relative to the store, so request
-    files stay small; `text` is only held in memory until the store writes it.
-    """
+    """A URL found in the course details and what could be read from it."""
 
     url: str
     status: FetchStatus = "failed"
@@ -274,8 +257,9 @@ class LinkedDocument:
     bytes: int | None = None
     """Size of the extracted text, recorded even when it was too large to keep."""
     path: str | None = None
+    """Store-relative file holding the extracted text."""
     text: Annotated[str | None, Field(exclude=True)] = None
-    """Held in memory only until the store writes it to `path`; never serialised."""
+    """Held in memory until the store writes it to `path`; never serialised."""
 
 
 @dataclass(kw_only=True)
@@ -288,9 +272,7 @@ class Request:
 
     schema_version: int = SCHEMA_VERSION
     created_at: str | None = None
-    """When the store first wrote this version of the request; None until then."""
     request_id: str = ""
-    """Keyed digest of `identity`, stable across exports; empty until the store assigns it."""
     identity: Identity
     mapping_type: str | None
     student: Student
@@ -305,7 +287,7 @@ class Request:
     related_request_ids: list[str] = field(default_factory=list)
     """Other requests in the same mapping group that the same export collected."""
     linked_documents: list[LinkedDocument] | None = None
-    """Documents fetched from URLs in the course details; None until the scrape stage ran."""
+    """None when the export did not scrape URLs."""
 
     @property
     def course(self) -> str:
@@ -350,19 +332,13 @@ class Proposal:
     remap_target: str | None = None
     remap_analysis: str | None = None
     fallback_verdict: Verdict | None = None
-    """For the reviewer only, never applied: the verdict a reviewer who disagrees
-    with `verdict` would most likely reach. Set only on close calls."""
+    """On close calls, the verdict a reviewer who disagrees with `verdict` would reach."""
     fallback_comment: str | None = None
-    """Complete EduRec text for `fallback_verdict`, following its template."""
     fallback_rationale: str | None = None
-    """Why the fallback is defensible, or why no alternative is (when the verdict is null)."""
+    """Why the fallback is defensible, or why no alternative is when there is none."""
 
     def prefills(self, existing: str | None) -> dict[Tab, str]:
-        """The comment box content per panel tab; the fallback only when there is one.
-
-        EduRec replaces the field, so the tab's comment goes on top and any
-        existing text is kept below it.
-        """
+        """The comment box content per panel tab, keeping any existing text below."""
         result: dict[Tab, str] = {"recommended": stack(self.comment, existing)}
         if self.fallback_verdict:
             result["fallback"] = stack(self.fallback_comment or "", existing)
@@ -377,12 +353,10 @@ def stack(comment: str, existing: str | None) -> str:
 
 @dataclass
 class Outcome:
-    """The outcome of showing one proposal to the reviewer.
+    """`outcomes/<request_id>/<hash>.yaml`: the verdict the reviewer submitted.
 
-    Stored as `outcomes/<request_id>/<hash>.yaml`, keyed by its path. `action` is the
-    verdict the reviewer submitted, or `not in approval queue` when the request left
-    the queue before it was opened; `reason` says why a submission could not be
-    verified. A request passed over is a `Skipped` reaction and never stored.
+    `action` is `not in approval queue` when the request left the queue before it was
+    opened; `reason` says why a submission could not be verified.
     """
 
     action: Action
@@ -395,7 +369,7 @@ class Outcome:
 
 
 class Clicked(NamedTuple):
-    """The reviewer's click on the detail page, as the posted `ICAction` and the comment box."""
+    """The `ICAction` the reviewer's click posted and the comment box at that moment."""
 
     action: str
     """A `browser.BUTTONS` id, or `#ICList` when Cancel returned to the list."""
@@ -403,8 +377,7 @@ class Clicked(NamedTuple):
 
 
 class Skipped(NamedTuple):
-    """The request was passed over without an EduRec button: the panel's Skip was
-    pressed (the comment box is then restored) or the detail page went away."""
+    """The request was passed over: the panel's Skip, or the detail page went away."""
 
     reason: str
 
@@ -413,7 +386,7 @@ Reaction = Clicked | Skipped
 
 
 class Fetched(NamedTuple):
-    """An HTTP response as the document fetcher reports it."""
+    """An HTTP response for the document fetcher."""
 
     status: int
     content_type: str | None
