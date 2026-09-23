@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import Collection, Document, MappingGroup, Request, plain
+from .models import Document, Request, plain
 
 INVENTORY = "inventory.yaml"
 REQUESTS = "requests"
@@ -21,26 +21,17 @@ def now() -> str:
 
 
 def document() -> Document:
-    return Document(collection=Collection(started_at=now()))
+    return Document(started_at=now())
 
 
-def mapping_groups(requests: list[Request]) -> list[MappingGroup]:
-    """Group requests by mapping identity and tell each request about its collected siblings."""
-    groups: dict[str, MappingGroup] = {}
+def link_siblings(requests: list[Request]) -> None:
+    """Tell each request about the other collected requests in its mapping group."""
+    groups: dict[tuple[str, ...], list[str]] = {}
     for request in requests:
-        group = groups.setdefault(
-            request.group_id,
-            MappingGroup(
-                group_id=request.group_id,
-                request_ids=[],
-                completeness="unverified" if request.many_to_one else "single_mapping",
-            ),
-        )
-        group.request_ids.append(request.request_id)
+        groups.setdefault(request.identity.mapping, []).append(request.request_id)
     for request in requests:
-        siblings = groups[request.group_id].request_ids
+        siblings = groups[request.identity.mapping]
         request.related_request_ids = [r for r in siblings if r != request.request_id]
-    return list(groups.values())
 
 
 def write_atomic(path: Path, content: str) -> None:
@@ -69,8 +60,7 @@ def save(data: Document, directory: str | Path, requests: Iterable[Request] | No
     writes them all.
     """
     run = Path(directory)
-    data.mapping_groups = mapping_groups(data.requests)
-    data.collection.updated_at = now()
+    link_siblings(data.requests)
     for request in data.requests if requests is None else requests:
         for linked in request.linked_documents or []:
             if linked.text is not None and linked.path and not (run / linked.path).exists():

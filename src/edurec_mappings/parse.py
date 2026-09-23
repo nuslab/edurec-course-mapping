@@ -109,12 +109,8 @@ def detail(soup: BeautifulSoup) -> Request:
         mapping_number=required("mapping number", field("TRNSFR_EQVLNCY_GRP")),
         sequence=required("sequence", field("TRNSFR_EQVLNCY_SEQ")),
     )
-    key = plain(identity)
-    group_key = {k: v for k, v in key.items() if k != "sequence"}
-    supporting_url = field("N_URL")
     return Request(
-        request_id=digest(key),
-        group_id=digest(group_key),
+        request_id=digest(plain(identity)),
         identity=identity,
         mapping_type=field("N_PU_MAP"),
         student=Student(
@@ -132,8 +128,7 @@ def detail(soup: BeautifulSoup) -> Request:
             instruction_weeks=field("WEEKS_OF_INSTRUCT"),
             contact_hours=table("N_EXSP_MOD", ContactHours, 3),
             assessments=table("N_EXSP_ASGNMT", Assessment, 3),
-            supporting_url=supporting_url,
-            supporting_document_status="not_fetched" if supporting_url else "not_provided",
+            supporting_url=field("N_URL"),
             other_information=field("N_MISC_DETAILS"),
         ),
         nus_course=NusCourse(

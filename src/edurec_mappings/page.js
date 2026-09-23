@@ -140,7 +140,7 @@
                         if (!window.confirm(question)) return block(event);
                     }
                 }
-                current.clicked = {id, comment: box ? box.value : null, tab: state.selected};
+                current.clicked = {id, comment: box ? box.value : null};
             });
         }
     }

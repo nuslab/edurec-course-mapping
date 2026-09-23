@@ -7,6 +7,7 @@ import unittest
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
@@ -18,6 +19,7 @@ from edurec_mappings.browser import (
     BUTTONS,
     CANCEL,
     COMMENTS,
+    SKIPPED,
     NotInQueueError,
     Reviewer,
 )
@@ -29,12 +31,10 @@ from edurec_mappings.models import (
     Confidence,
     Decision,
     Identity,
-    Left,
     Outcome,
     Request,
     Reviewed,
     Skipped,
-    Tab,
     Verdict,
     hydrate,
     plain,
@@ -49,8 +49,6 @@ from edurec_mappings.review import (
     Item,
     Progress,
     comment_problem,
-    comment_source,
-    course_names,
     load_queue,
     load_reviewed,
     overlap_colour,
@@ -69,9 +67,7 @@ STARTED = "2026-09-22T10:00:00+00:00"
 
 
 class DecisionFields(TypedDict, total=False):
-    source_export: str
     source_started_at: str
-    course: str
     comment: str
     overlap_percentage: int
     decision_confidence: Confidence
@@ -129,10 +125,8 @@ def decision(
     request: Request, verdict: Verdict = "approve", **overrides: Unpack[DecisionFields]
 ) -> Decision:
     values = Decision(
-        source_export="anon",
         source_started_at=STARTED,
         request_id=request.request_id,
-        course="CS 1 (PU) -> CS3243",
         verdict=verdict,
         comment="Approved: the syllabus covers search & <planning>.",
         overlap_percentage=85,
@@ -149,10 +143,11 @@ def make_run(directory: str, count: int = 4) -> tuple[Path, Path, list[Request]]
     run, anon = Path(directory) / "run", Path(directory) / "run-anonymized"
     requests = [copy.deepcopy(r) for _, r in records()[:count]]
     if count > 1:  # The first two become parts of one many-to-one mapping.
-        requests[1].group_id = requests[0].group_id
+        requests[1].identity = replace(requests[0].identity, sequence="2")
+        requests[1].request_id = digest(plain(requests[1].identity))
         requests[0].mapping_type = requests[1].mapping_type = "Many to One"
     data = document()
-    data.collection.started_at = STARTED
+    data.started_at = STARTED
     data.requests = requests
     save(data, run)
     save(anonymize(data), anon)
@@ -190,11 +185,8 @@ class FakeSite:
         self.current = live.request_id
         return live
 
-    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> dict[Tab, str]:
+    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> None:
         self.prepared.append((decision.request_id, panel, dry_run))
-        live = self.live.get(self.current)
-        assert not isinstance(live, Exception)
-        return decision.prefills(live.comments if live else None)
 
     def await_action(self) -> Outcome:
         outcome = self.outcomes[self.current]
@@ -274,7 +266,7 @@ class ReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, _ = make_run(directory)
             inventory = yaml.safe_load((run / "inventory.yaml").read_text())
-            inventory["collection"]["started_at"] = "other"
+            inventory["started_at"] = "other"
             (run / "inventory.yaml").write_text(dump(inventory))
             with self.assertRaisesRegex(RuntimeError, "different export"):
                 load_queue(run, decisions)
@@ -298,22 +290,14 @@ class ReviewTests(unittest.TestCase):
                     verdict_recommended="approve",
                     action="approve",
                     comment_submitted="x",
-                    comment_edited=False,
-                    status_before=PENDING,
-                    status_after="Approved",
                     reviewed_at=STARTED,
-                    dry_run=False,
                 ),
                 Reviewed(
                     request_id=requests[3].request_id,
                     verdict_recommended="approve",
                     action="skip",
                     comment_submitted=None,
-                    comment_edited=False,
-                    status_before=PENDING,
-                    status_after=None,
                     reviewed_at=STARTED,
-                    dry_run=False,
                     reason="reviewer skipped",
                 ),
             ]
@@ -342,22 +326,14 @@ class ReviewTests(unittest.TestCase):
                     verdict_recommended="request remapping",
                     action="request remapping",
                     comment_submitted="x",
-                    comment_edited=False,
-                    status_before=PENDING,
-                    status_after="not in approval queue",
                     reviewed_at=earlier,
-                    dry_run=False,
                 ),
                 Reviewed(
                     request_id=requests[1].request_id,
                     verdict_recommended="approve",
                     action="skip",
                     comment_submitted=None,
-                    comment_edited=False,
-                    status_before=PENDING,
-                    status_after=None,
                     reviewed_at=earlier,
-                    dry_run=False,
                     reason=VANISHED,
                 ),
                 Reviewed(
@@ -365,11 +341,7 @@ class ReviewTests(unittest.TestCase):
                     verdict_recommended="approve",
                     action="approve",
                     comment_submitted="x",
-                    comment_edited=False,
-                    status_before=PENDING,
-                    status_after="Approved",
                     reviewed_at=STARTED,
-                    dry_run=False,
                 ),
             ]
             remaining = {item.request.request_id for item in select(queue, log, started=STARTED)}
@@ -393,11 +365,7 @@ class ReviewTests(unittest.TestCase):
                 verdict_recommended="reject",
                 action="skip",
                 comment_submitted=None,
-                comment_edited=False,
-                status_before=PENDING,
-                status_after=None,
                 reviewed_at=STARTED,
-                dry_run=True,
                 reason="comment is empty",
             )
             path.write_text(dump([plain(entry)]))
@@ -449,11 +417,7 @@ class ReviewTests(unittest.TestCase):
                     verdict_recommended="approve",
                     action="reject",
                     comment_submitted="x",
-                    comment_edited=True,
-                    status_before=PENDING,
-                    status_after="Rejected",
                     reviewed_at=STARTED,
-                    dry_run=False,
                 )
             ]
             courses = {sibling: "CS 2 (PU) -> CS3243"}
@@ -468,7 +432,7 @@ class ReviewTests(unittest.TestCase):
                 f'class="pill" data-tab="fallback" style="background:{AMBER}"',
                 ">Request Remapping<",
                 f'style="background:{GREEN}">85% Overlap<',
-                "CS 1 (PU) -&gt; CS3243",
+                escape(item.request.course),
                 'class="bar"',
                 "width:25%",
                 "3 of 12 this session &middot; 5 of 104 overall",
@@ -588,29 +552,18 @@ class ReviewTests(unittest.TestCase):
             self.assertGreater(html.index(badge), html.index("</header>"), "not in the header")
             self.assertIn(f'style="background:{colours[1]}">{overlap}% Overlap<', html)
 
-    def test_course_names_come_from_the_decision_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            _, decisions, requests = make_run(directory, count=2)
-            names = course_names(decisions)
-            self.assertEqual(names, {r.request_id: "CS 1 (PU) -> CS3243" for r in requests})
-
-    def test_comment_source_follows_the_selected_tab(self) -> None:
+    def test_course_is_derived_from_the_request(self) -> None:
         _, request = records()[0]
-        advice = decision(request, **FALLBACK)
-        prefills = advice.prefills("older")
+        self.assertEqual(
+            request.course, "EXU 1001 (Example College) -> CS3243"
+        )
+        self.assertNotIn("course", plain(request), "Derived, never stored")
+
+    def test_prefills_offer_the_fallback_only_when_there_is_one(self) -> None:
+        _, request = records()[0]
+        prefills = decision(request, **FALLBACK).prefills("older")
         self.assertEqual(list(prefills), ["recommended", "fallback"])
         self.assertEqual(prefills["fallback"], FALLBACK["fallback_comment"] + "\n\nolder")
-        self.assertEqual(
-            comment_source(prefills["recommended"], "recommended", prefills), "recommended"
-        )
-        self.assertEqual(
-            comment_source(prefills["fallback"] + "\n", "fallback", prefills), "fallback"
-        )
-        self.assertEqual(comment_source(prefills["fallback"], "recommended", prefills), "edited")
-        self.assertEqual(comment_source("typed", "fallback", prefills), "edited")
-        # Without the hook's report the text alone decides.
-        self.assertEqual(comment_source(prefills["fallback"], None, prefills), "fallback")
-        self.assertEqual(comment_source(None, None, prefills), "edited")
         self.assertEqual(list(decision(request).prefills(None)), ["recommended"])
 
     def test_loop_logs_every_outcome_and_stops_when_unverified(self) -> None:
@@ -625,33 +578,26 @@ class ReviewTests(unittest.TestCase):
                 {
                     ids[0]: Clicked(approve, decision(requests[0]).comment),
                     ids[1]: Clicked(reject, edited),
-                    ids[2]: Skipped("busy"),
+                    ids[2]: Skipped(f"{SKIPPED}: busy"),
                 },
                 live={ids[3]: stale},
             )
             log = {e.request_id: e for e in review(site, run, decisions)}
             self.assertEqual(len(site.prepared), 3, "The stale request never gets a panel")
             self.assertEqual([log[i].action for i in ids], ["approve", "reject", "skip", "skip"])
-            self.assertEqual(log[ids[0]].comment_edited, False)
-            self.assertEqual(log[ids[0]].comment_source, "recommended")
-            self.assertEqual(log[ids[1]].comment_edited, True)
-            self.assertEqual(log[ids[1]].comment_source, "edited")
             self.assertEqual(log[ids[1]].comment_submitted, edited)
-            self.assertIsNone(log[ids[2]].comment_source)
             self.assertEqual(log[ids[2]].reason, "skipped by the reviewer: busy")
-            self.assertEqual(
-                (log[ids[0]].status_before, log[ids[0]].status_after), (PENDING, "Approved")
-            )
+            self.assertIsNone(log[ids[0]].reason, "A status other than pending verifies")
             self.assertIn("Approved", log[ids[3]].reason or "")
             self.assertEqual({e.request_id: e for e in load_reviewed(decisions / REVIEWED)}, log)
 
             # A second session offers only the skipped ones and records a cancel.
-            site = FakeSite({ids[2]: Clicked("#ICList", None), ids[3]: Skipped()})
+            site = FakeSite({ids[2]: Clicked("#ICList", None), ids[3]: Skipped(SKIPPED)})
             second = {e.request_id: e for e in review(site, run, decisions)}
             self.assertEqual(sorted(site.opened), sorted(ids[2:]))
             self.assertEqual({e.action for e in second.values()}, {"skip"})
             self.assertIn("Cancel", second[ids[2]].reason or "")
-            self.assertEqual(second[ids[3]].reason, "skipped by the reviewer")
+            self.assertEqual(second[ids[3]].reason, SKIPPED)
             self.assertEqual(len(load_reviewed(decisions / REVIEWED)), 6)
             panels = [panel for _, panel, _ in site.prepared]
             ordered(panels[0], "width:50%", "1 of 2 this session &middot; 2 of 4 overall")
@@ -661,10 +607,11 @@ class ReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=2)
             ids = [r.request_id for r in requests]
-            site = FakeSite({ids[0]: Skipped(), ids[1]: Skipped()})
+            site = FakeSite({ids[0]: Skipped(SKIPPED), ids[1]: Skipped(SKIPPED)})
             log = review(site, run, decisions, dry_run=True)
-            self.assertTrue(all(e.dry_run and e.action == "skip" for e in log))
+            self.assertEqual([e.action for e in log], ["skip", "skip"])
             self.assertTrue(all(dry for _, _, dry in site.prepared))
+            self.assertFalse((decisions / REVIEWED).exists(), "A dry run is not logged")
             outcomes = {i: Clicked(button_for("approve"), "c") for i in ids}
             site = FakeSite(outcomes, status_after=PENDING)
             with self.assertRaisesRegex(RuntimeError, "not verified"):
@@ -672,14 +619,14 @@ class ReviewTests(unittest.TestCase):
             entries = load_reviewed(decisions / REVIEWED)
             self.assertEqual(entries[-1].action, "approve")
             self.assertIn("not verified", entries[-1].reason or "")
-            self.assertEqual(len(entries), 3)
+            self.assertEqual(len(entries), 1)
 
     def test_leaving_the_page_and_a_vanished_request_are_logged_as_skips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=3)
             ids = [r.request_id for r in requests]
             site = FakeSite(
-                {ids[0]: Left(), ids[2]: Skipped()},
+                {ids[0]: Skipped("reviewer left the page"), ids[2]: Skipped(SKIPPED)},
                 live={ids[1]: NotInQueueError("gone")},
             )
             log = {e.request_id: e for e in review(site, run, decisions)}
@@ -689,11 +636,10 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual([log[i].action for i in ids], ["skip"] * 3)
             self.assertEqual(log[ids[0]].reason, "reviewer left the page")
             self.assertEqual(log[ids[1]].reason, "no longer in the approval queue")
-            self.assertIsNone(log[ids[1]].status_before)
             self.assertEqual(sorted(r for r, _, _ in site.prepared), sorted([ids[0], ids[2]]))
             self.assertEqual(log[ids[1]].reason, VANISHED)
             # A vanished request is final: the next session neither opens nor re-logs it.
-            site = FakeSite({ids[0]: Skipped(), ids[2]: Skipped()})
+            site = FakeSite({ids[0]: Skipped(SKIPPED), ids[2]: Skipped(SKIPPED)})
             second = review(site, run, decisions)
             self.assertEqual(sorted(site.opened), sorted([ids[0], ids[2]]))
             self.assertEqual(sorted(e.request_id for e in second), sorted([ids[0], ids[2]]))
@@ -715,7 +661,6 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual((entry.request_id, entry.action), (first, "approve"))
             self.assertEqual(entry.comment_submitted, comment)
             self.assertEqual(entry.reason, f"{UNVERIFIED}: browser went away")
-            self.assertIsNone(entry.status_after)
             # The provisional entry is final: the next session offers only the other request.
             site = FakeSite(outcomes)
             log = review(site, run, decisions)
@@ -724,7 +669,6 @@ class ReviewTests(unittest.TestCase):
             entries = load_reviewed(decisions / REVIEWED)
             self.assertEqual([e.request_id for e in entries], [first, other])
             self.assertEqual(entries[1].reason, None)
-            self.assertEqual(entries[1].status_after, "Approved")
 
     def test_request_that_left_the_queue_counts_as_verified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -732,13 +676,11 @@ class ReviewTests(unittest.TestCase):
             remap = button_for("request remapping")
             advice = decision(requests[0], **FALLBACK)
             (decisions / f"{requests[0].request_id}.yaml").write_text(dump(plain(advice)))
-            outcome = Clicked(remap, advice.prefills(None)["fallback"], "fallback")
+            outcome = Clicked(remap, advice.prefills(None)["fallback"])
             site = FakeSite({requests[0].request_id: outcome}, status_after=NOT_IN_QUEUE)
             (entry,) = review(site, run, decisions)
             self.assertEqual(entry.action, "request remapping")
-            self.assertEqual(entry.comment_source, "fallback")
-            self.assertFalse(entry.comment_edited)
-            self.assertEqual(entry.status_after, NOT_IN_QUEUE)
+            self.assertEqual(entry.comment_submitted, FALLBACK["fallback_comment"])
             self.assertIsNone(entry.reason)
 
     def test_bad_comment_is_never_prefilled(self) -> None:
@@ -856,8 +798,7 @@ class ReviewTests(unittest.TestCase):
                     box.value = {value!r}; box.dispatchEvent(new Event('input')); }}"""
                 )
 
-            entered = site.prepare(advice, panel, dry_run=False)
-            self.assertEqual(entered, {"recommended": recommended, "fallback": fallback})
+            site.prepare(advice, panel, dry_run=False)
             self.assertEqual(recommended, advice.comment + "\n\nprior", "new comment on top")
             self.assertEqual(box.input_value(), recommended)
             self.assertEqual(page.evaluate("window.changes"), 1, "change event dispatched")
@@ -958,7 +899,7 @@ class ReviewTests(unittest.TestCase):
             later(f"document.getElementById('{COMMENTS}').value = 'kept'; " + rerender)
             later(f"window.restored = ({in_panel('#skip')} ? 1 : 0)", 300)
             later(f"{in_panel('#skip')}.click()", 500)
-            self.assertEqual(site.await_action(), Skipped("later"))
+            self.assertEqual(site.await_action(), Skipped(f"{SKIPPED}: later"))
             self.assertEqual(page.evaluate("window.restored"), 1)
             state = panel_state()
             self.assertEqual(
@@ -984,7 +925,7 @@ class ReviewTests(unittest.TestCase):
             self.assertTrue(all(page.locator(f"#{b}").is_disabled() for b in BUTTONS))
             self.assertFalse(page.locator(f"#{CANCEL}").is_disabled())
             later(f"{in_panel('#skip')}.click()")
-            self.assertEqual(site.await_action(), Skipped())
+            self.assertEqual(site.await_action(), Skipped(SKIPPED))
 
             # A re-render also restores the dry-run state; the box keeps the reviewer's text.
             site.prepare(advice, panel, dry_run=True)
@@ -998,7 +939,7 @@ class ReviewTests(unittest.TestCase):
                 300,
             )
             later(f"{in_panel('#skip')}.click()", 500)
-            self.assertEqual(site.await_action(), Skipped())
+            self.assertEqual(site.await_action(), Skipped(SKIPPED))
             self.assertEqual(
                 page.evaluate("window.restored"),
                 {"panels": 1, "disabled": [True] * len(BUTTONS), "value": "kept"},
@@ -1006,14 +947,14 @@ class ReviewTests(unittest.TestCase):
 
             site.prepare(advice, panel, dry_run=False)
             later(f"document.getElementById('{DETAIL}').remove(); " + rerender)
-            self.assertEqual(site.await_action(), Left())
+            self.assertEqual(site.await_action(), Skipped("reviewer left the page"))
             page.evaluate(f"document.body.insertAdjacentHTML('beforeend', '{fields}')")
 
             site.prepare(advice, panel, dry_run=True)
             # A stale page may have lost `disabled` but keep the hook: the click is still blocked.
             later(f"document.getElementById('{approve}').disabled = false; " + press(approve))
             later(f"{in_panel('#skip')}.click()", 300)
-            self.assertEqual(site.await_action(), Skipped())
+            self.assertEqual(site.await_action(), Skipped(SKIPPED))
             self.assertEqual(messages, ["Dry run: nothing is submitted"])
             self.assertEqual(posts, [])
 
@@ -1021,7 +962,9 @@ class ReviewTests(unittest.TestCase):
             site.prepare(advice, panel, dry_run=False)
             later(press(reject))
             later(f"{in_panel('#skip')}.click()", 300)
-            self.assertEqual(site.await_action(), Skipped(), "A dismissed confirm aborts the click")
+            self.assertEqual(
+                site.await_action(), Skipped(SKIPPED), "A dismissed confirm aborts the click"
+            )
             self.assertEqual(messages, ["Recommended: Approve. Submit Reject anyway?"])
             self.assertEqual(posts, [])
 
@@ -1030,7 +973,7 @@ class ReviewTests(unittest.TestCase):
             site.prepare(advice, panel, dry_run=False)
             later(press(remap))
             later(f"{in_panel('#skip')}.click()", 300)
-            self.assertEqual(site.await_action(), Skipped())
+            self.assertEqual(site.await_action(), Skipped(SKIPPED))
             self.assertEqual(
                 messages, ["This matches the fallback. Switch to the fallback comment and submit?"]
             )
@@ -1042,7 +985,7 @@ class ReviewTests(unittest.TestCase):
             site.prepare(advice, panel, dry_run=False)
             answers.append(True)
             later(press(remap))
-            self.assertEqual(site.await_action(), Clicked(remap, fallback, "fallback"))
+            self.assertEqual(site.await_action(), Clicked(remap, fallback))
             self.assertEqual(len(posts), 1)
             self.assertEqual(box.input_value(), fallback)
             self.assertEqual(panel_state()["selected"], "fallback")
@@ -1054,7 +997,7 @@ class ReviewTests(unittest.TestCase):
             page.evaluate(f"{in_panel('.pane[data-tab=fallback] .select')}.click()")
             later(press(approve))
             later(f"{in_panel('#skip')}.click()", 300)
-            self.assertEqual(site.await_action(), Skipped())
+            self.assertEqual(site.await_action(), Skipped(SKIPPED))
             self.assertEqual(
                 messages, ["Fallback selected: Request Remapping. Submit Approve anyway?"]
             )
@@ -1065,19 +1008,19 @@ class ReviewTests(unittest.TestCase):
             site.prepare(advice, panel, dry_run=False)
             page.evaluate(f"{in_panel('.tab[data-tab=fallback]')}.click()")
             later(press(approve))
-            self.assertEqual(site.await_action(), Clicked(approve, recommended, "recommended"))
+            self.assertEqual(site.await_action(), Clicked(approve, recommended))
             self.assertEqual(messages, [])
 
             site.prepare(advice, panel, dry_run=False)
             later(f"document.getElementById('{COMMENTS}').value = 'edited'; " + press(approve))
-            self.assertEqual(site.await_action(), Clicked(approve, "edited", "recommended"))
+            self.assertEqual(site.await_action(), Clicked(approve, "edited"))
 
             site.prepare(advice, panel, dry_run=False)
             later(press(CANCEL))
             # The mock page never navigates, so the box still holds the edited text.
             self.assertEqual(
                 site.await_action(),
-                Clicked("#ICList", advice.comment + "\n\nedited", "recommended"),
+                Clicked("#ICList", advice.comment + "\n\nedited"),
             )
             browser.close()
 

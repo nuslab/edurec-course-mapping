@@ -46,7 +46,7 @@
 {%- endif %}
 {{- pill(decision.overlap_percentage ~ "% Overlap", overlap_colour) -}}
 </div>
-<div class="course">{{ decision.course }}</div>
+<div class="course">{{ request.course }}</div>
 <div class="bar"><span style="width:{{ done }}%"></span></div>
 <div class="progress"><span>{{ progress.position }} of {{ progress.total }} this session &middot; {{ progress.submitted }} of {{ progress.requests }} overall</span>
 {%- if dry_run %}{{ warn("Dry run: action buttons disabled, only Skip advances") }}{% endif -%}

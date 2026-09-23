@@ -103,7 +103,7 @@ the whole inventory:
 
 ```
 module-mappings/
-├── inventory.yaml            # collection audit, mapping_groups, list_pages
+├── inventory.yaml            # export audit: filters, status, searched partitions
 ├── requests/<request_id>.yaml   # one file per unique request
 ├── documents/<hash>.txt      # scraped text, one file per URL (--scrape-urls)
 ├── decisions/<request_id>.yaml  # written by the course-mapping advisor, not by this package
@@ -116,10 +116,10 @@ old export. Each decision file records the `source_started_at` of the export
 it was made from, so the approval script can tell which decisions predate the
 current export.
 
-- `inventory.yaml` (schema version 4): `collection` holds filters, status,
-  counts and the search-partition audit; `mapping_groups` lists request IDs
-  grouped by mapping identity; `list_pages` keeps the source result rows and
-  search criteria.
+- `inventory.yaml` (schema version 5): `started_at`, `status` and `error`,
+  `anonymized`, the requested scope (`reassign_id`, `terms`, `row_limit`), the
+  search-partition audit and the count of duplicate details. It holds no
+  request data or result rows; the requests are the files under `requests/`.
 - `requests/<request_id>.yaml`: the EduRec identity, the student's programme
   and terms, the partner course (syllabus, credits, contact hours, assessments,
   supporting URL), the target NUS course, prerequisites, status, prior
@@ -138,14 +138,14 @@ partner university, study program, term, mapping number, sequence). It is
 stable across runs, unaffected by edits to comments or URLs, and is the only
 key a decision needs to link back to a request.
 
-`collection.status` is `complete` when every partition and page was scanned,
+`status` is `complete` when every partition and page was scanned,
 `row_limit_reached` for an intentional partial export, or `interrupted` when a
 run stopped early. Only `complete` is an inventory.
 
 The anonymized copy is a complete run directory, documents included. It
 replaces each student ID with a `student-<hex>` pseudonym that is consistent
-within the copy, drops student names and user IDs, and sets
-`collection.anonymized: true`. The salt is random per run and never stored, so
+within the copy and sets
+`anonymized: true`. The salt is random per run and never stored, so
 pseudonyms cannot be reversed or matched across exports.
 
 ## Review
@@ -153,7 +153,7 @@ pseudonyms cannot be reversed or matched across exports.
 Once the advisor has written `decisions/` inside the anonymized copy, submit
 them in EduRec yourself with the program as a guide. Try `--dry-run` first: it
 walks the same queue with the action buttons disabled, so you can read the
-panels and check the pre-filled comments without submitting anything.
+panels and check the pre-filled comments without submitting or logging anything.
 
 ```sh
 edurec-mappings review --run ../edurec-data/output/module-mappings --dry-run
@@ -177,7 +177,8 @@ into it. From top to bottom it shows:
 - a header with two coloured badges: the selected verdict (green for approve,
   red for reject, amber for the two requests; the matching EduRec button gets
   an outline in the same colour) and the overlap percentage (green from 70%,
-  amber from 40%, red below); under them the course, a thin progress bar and
+  amber from 40%, red below); under them the course (PU subject and number,
+  university, NUS course, taken from the request), a thin progress bar and
   the caption `<position> of <total> this session · <submitted> of <requests>
   overall`;
 - two tabs, **Recommended** and **Fallback**, each a bordered card. Clicking a
@@ -230,12 +231,9 @@ click on an unwatched page would go unrecorded; do not act in EduRec after the
 program has stopped.
 
 Every outcome is appended to `decisions/reviewed.yaml` before the next request
-opens: request id, recommended verdict, the action taken (a verdict or
-`skip`), the comment as submitted, which text it was (`comment_source` is
-`recommended`, `fallback`, or `edited` when the box differed from the selected
-tab's text; `comment_edited` says the same as a flag), status before and
-after, timestamp, dry-run flag and a reason for skips or unverified
-submissions. A skip reason typed into the panel is logged as
+opens: request id, the verdict recommended at the time, the action taken (a
+verdict or `skip`), the comment as submitted, timestamp, and a reason for skips
+or unverified submissions. A dry run writes nothing to the log. A skip reason typed into the panel is logged as
 `skipped by the reviewer: <reason>`. Requests logged with a verdict are never offered again, including
 unverified ones; skipped requests are offered on the next session. Parts of a
 many-to-one mapping are queued consecutively and the panel warns when a
@@ -250,8 +248,8 @@ sibling was already submitted with a different action.
   information, prerequisites and comments are fetched through the browser
   session. PDFs are read with pypdf, HTML and text with BeautifulSoup, and
   Dropbox links use `dl=1`. Failures are recorded per URL and never abort a run.
-- Many-to-one groups stay `completeness: unverified`; sibling requests may fall
-  outside the current reassignee or term scope. The NUS syllabus is not
+- A many-to-one request's `related_request_ids` lists only the siblings this
+  export collected; others may fall outside the current reassignee or term scope. The NUS syllabus is not
   exported because the detail page does not show it.
 - Scope is whatever the signed-in user can see in Course Mapping Approval, with
   no Mapping Status filter.
@@ -269,7 +267,7 @@ ruff format . && ruff check --fix . && mypy && pytest
 The code, tests included, is fully type-annotated (ruff's `ANN` rules) and
 checked with `mypy --strict`. Records are
 dataclasses in `models.py`: the request records hold what a mapping decision
-needs, the collection records hold the extraction audit, and `Decision` mirrors
+needs, `Document` holds the extraction audit, and `Decision` mirrors
 one `decisions/<request_id>.yaml` file as `.claude/agents/course-mapping.md` specifies it. `plain`
 turns a record into the dictionary written to YAML (`Document.inventory()` is the
 export without its requests) and `hydrate` reads one back. Both go through a

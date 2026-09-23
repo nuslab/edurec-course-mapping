@@ -94,7 +94,6 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(docs[1].path, f"documents/{document_name('https://example.org/page')}")
         self.assertEqual(docs[2].error, "HTTP 404")
         self.assertIsNone(docs[2].path)
-        self.assertEqual(request.partner_course.supporting_document_status, "fetched")
         fetch_documents(request, fetch, cache)
         self.assertEqual(len(calls), 3, "Cached URLs must not be fetched again")
         self.assertIsNot((request.linked_documents or [])[0], cache[docs[0].url])
@@ -108,7 +107,6 @@ class DocumentTests(unittest.TestCase):
         fetch_documents(request, fetch)
         (document,) = request.linked_documents or []
         self.assertEqual((document.status, document.error), ("failed", "network down"))
-        self.assertEqual(request.partner_course.supporting_document_status, "failed")
 
     def test_expand_action_only_when_larger_view_is_offered(self) -> None:
         soup = fixture("main.html")

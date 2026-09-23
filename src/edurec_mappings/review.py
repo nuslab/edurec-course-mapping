@@ -4,8 +4,8 @@ The program reopens a request, pre-fills the comment box with the decision's
 comment and injects a panel with the decision. The reviewer presses one of
 EduRec's own buttons (or the panel's Skip); the program never does. After the
 postback it verifies that the status left "Pending Approval" (a request that
-disappeared from the approval queue counts as verified) and appends an
-`Reviewed` entry to `decisions/reviewed.yaml`.
+disappeared from the approval queue counts as verified) and appends a
+`Reviewed` entry to `decisions/reviewed.yaml`; a dry run logs nothing.
 
 Only clicks made while the panel is shown are observed and logged.
 """
@@ -30,15 +30,12 @@ from .models import (
     PENDING,
     RED,
     VERDICT_COLOURS,
-    CommentSource,
     Confidence,
     Decision,
-    Left,
     Outcome,
     Request,
     Reviewed,
     Skipped,
-    Tab,
     display,
     hydrate,
     plain,
@@ -71,10 +68,15 @@ PANEL = TEMPLATES.get_template("panel.html")
 
 
 class Log:
-    """`decisions/reviewed.yaml`: every change is written through at once, atomically."""
+    """`decisions/reviewed.yaml`: every change is written through at once, atomically.
 
-    def __init__(self, path: Path) -> None:
+    A dry run keeps its entries in memory only: it can only skip, and skips are
+    offered again anyway.
+    """
+
+    def __init__(self, path: Path, dry_run: bool = False) -> None:
         self.path = path
+        self.dry_run = dry_run
         self.entries = load_reviewed(path)
 
     def append(self, entry: Reviewed) -> None:
@@ -86,7 +88,8 @@ class Log:
         self.flush()
 
     def flush(self) -> None:
-        write_atomic(self.path, dump([plain(entry) for entry in self.entries]))
+        if not self.dry_run:
+            write_atomic(self.path, dump([plain(entry) for entry in self.entries]))
 
 
 class Progress(NamedTuple):
@@ -107,11 +110,11 @@ class Site(Protocol):
     def open(self, request: Request) -> Request:
         """Reopen the request; raises `NotInQueueError` when it left the approval queue."""
 
-    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> Mapping[Tab, str]:
-        """Pre-fill the comment box and inject the panel; returns each tab's pre-filled text."""
+    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> None:
+        """Pre-fill the comment box and inject the panel."""
 
     def await_action(self) -> Outcome:
-        """The reviewer's click, the panel's Skip, or the detail page going away."""
+        """The reviewer's click, or a skip: the panel's Skip or the detail page going away."""
 
     def status(self, request: Request) -> str | None:
         """The live status after the click; `NOT_IN_QUEUE` when the request left the queue."""
@@ -127,7 +130,7 @@ class Item:
 
 def started_at(run: Path) -> str:
     inventory = yaml.safe_load((run / INVENTORY).read_text(encoding="utf-8"))
-    return str(inventory["collection"]["started_at"])
+    return str(inventory["started_at"])
 
 
 def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict[str, str]]:
@@ -157,10 +160,10 @@ def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict
         else:
             request = hydrate(Request, yaml.safe_load(request_path.read_text(encoding="utf-8")))
             items.append(Item(decision, request))
-    first_seen: dict[str, int] = {}
+    first_seen: dict[tuple[str, ...], int] = {}
     for index, item in enumerate(items):
-        first_seen.setdefault(item.request.group_id, index)
-    items.sort(key=lambda item: first_seen[item.request.group_id])
+        first_seen.setdefault(item.request.identity.mapping, index)
+    items.sort(key=lambda item: first_seen[item.request.identity.mapping])
     return items, rejected
 
 
@@ -176,28 +179,6 @@ def load_reviewed(path: Path) -> list[Reviewed]:
         return []
     entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
     return [hydrate(Reviewed, entry) for entry in entries]
-
-
-def course_names(decisions: Path) -> dict[str, str]:
-    """Each decision's display course string, keyed by request id."""
-    names: dict[str, str] = {}
-    for _, data in decision_files(decisions):
-        if isinstance(data, dict) and "request_id" in data:
-            names[str(data["request_id"])] = str(data.get("course", ""))
-    return names
-
-
-def comment_source(
-    comment: str | None, tab: Tab | None, prefills: Mapping[Tab, str]
-) -> CommentSource:
-    """Which pre-filled text was submitted: the selected tab's if it still matches, else `edited`.
-
-    Without the hook's report of the selected tab, a comment equal to either
-    pre-filled text is attributed to that tab.
-    """
-    text = (comment or "").strip()
-    candidates: Iterable[Tab] = [tab] if tab is not None and tab in prefills else prefills
-    return next((t for t in candidates if prefills[t].strip() == text), "edited")
 
 
 def since_export(log: Iterable[Reviewed], started: str | None) -> list[Reviewed]:
@@ -235,7 +216,7 @@ def select(
 
     Skips are offered again, except a request that left the approval queue:
     it cannot come back, so its skip is final. Only entries made since the
-    export started (`started`, the collection's `started_at`) count: a request
+    export started (`started`, the export's `started_at`) count: a request
     resubmitted after an earlier round keeps its id and is offered again.
     """
     log = since_export(log, started)
@@ -286,7 +267,10 @@ def panel_html(
     existing: str | None = None,
     courses: Mapping[str, str] | None = None,
 ) -> str:
-    """The reviewer's panel from `templates/panel.html`; every value is HTML-escaped."""
+    """The reviewer's panel from `templates/panel.html`; every value is HTML-escaped.
+
+    `courses` names the siblings, keyed by request id.
+    """
     decision = item.decision
     return PANEL.render(
         decision=decision,
@@ -329,11 +313,7 @@ def review_item(
         verdict_recommended=decision.verdict,
         action="skip",
         comment_submitted=None,
-        comment_edited=False,
-        status_before=live.status if live else None,
-        status_after=None,
         reviewed_at=now(),
-        dry_run=dry_run,
     )
     if live is None:
         return replace(entry, reason=VANISHED)
@@ -341,13 +321,10 @@ def review_item(
     if reason:
         return replace(entry, reason=reason)
     panel = panel_html(item, progress, log, dry_run, existing=live.comments, courses=courses)
-    prefills = site.prepare(decision, panel, dry_run)
+    site.prepare(decision, panel, dry_run)
     clicked = site.await_action()
     if isinstance(clicked, Skipped):
-        why = f": {clicked.reason.strip()}" if clicked.reason.strip() else ""
-        return replace(entry, reason=f"skipped by the reviewer{why}")
-    if isinstance(clicked, Left):
-        return replace(entry, reason="reviewer left the page")
+        return replace(entry, reason=clicked.reason)
     verdict = BUTTONS.get(clicked.action)
     if verdict is None:
         return replace(entry, reason="Cancel pressed in EduRec")
@@ -361,14 +338,10 @@ def review_item(
         )
     )
     status_after = site.status(exported)  # Anything but None or pending verifies the submission.
-    source = comment_source(clicked.comment, clicked.source, prefills)
     return replace(
         entry,
         action=verdict,
         comment_submitted=clicked.comment,
-        comment_edited=source == "edited",
-        comment_source=source,
-        status_after=status_after,
         reviewed_at=now(),
         reason=(
             f"submission not verified: live status is {status_after!r}"
@@ -389,12 +362,12 @@ def review(
 ) -> list[Reviewed]:
     """Walk the queue with the reviewer; returns this session's log entries.
 
-    Every entry is written to `decisions/reviewed.yaml` before the next request is
-    opened, and a provisional entry is written the moment a click is seen: an
-    error after the click leaves the verdict on record with the error as reason,
-    then the session stops. A submission whose status did not leave "Pending
-    Approval" is logged with its verdict and a reason, then the session stops: it
-    is never retried. A request that already left the approval queue is logged
+    Every entry is written to `decisions/reviewed.yaml` (except in a dry run)
+    before the next request is opened, and a provisional entry is written the
+    moment a click is seen: an error after the click leaves the verdict on record
+    with the error as reason, then the session stops. A submission whose status
+    did not leave "Pending Approval" is logged with its verdict and a reason, then
+    the session stops: it is never retried. A request that already left the approval queue is logged
     as a skip and not offered again.
     """
     run = Path(run)
@@ -402,7 +375,7 @@ def review(
     queue, rejected = load_queue(run, decisions)
     for request_id, why in rejected.items():
         print(f"Not applicable {request_id}: {why}", flush=True)
-    log = Log(decisions / REVIEWED)
+    log = Log(decisions / REVIEWED, dry_run)
     started = started_at(decisions.parent)
     vanished = {
         entry.request_id
@@ -411,8 +384,8 @@ def review(
     }
     for request_id in sorted(vanished):
         print(f"Not applicable {request_id}: {VANISHED}", flush=True)
+    courses = {item.request.request_id: item.request.course for item in queue}
     queue = select(queue, log.entries, request_ids, verdicts, started)
-    courses = course_names(decisions)
     requests = sum(1 for _ in (run / REQUESTS).glob("*.yaml"))
     session: list[Reviewed] = []
     for position, item in enumerate(queue, 1):
@@ -446,7 +419,7 @@ def review(
         session.append(entry)
         detail = f" ({entry.reason})" if entry.reason else ""
         print(
-            f"{position}/{len(queue)} {entry.request_id} {item.decision.course}: "
+            f"{position}/{len(queue)} {entry.request_id} {item.request.course}: "
             f"{entry.action}{detail}",
             flush=True,
         )
@@ -454,5 +427,6 @@ def review(
             raise RuntimeError(f"{entry.request_id}: {entry.reason}")
     counts = Counter(entry.action for entry in session)
     summary = ", ".join(f"{count} {action}" for action, count in sorted(counts.items()))
-    print(f"Reviewed {len(session)} of {len(queue)} queued: {summary or 'nothing'} → {log.path}")
+    target = "not logged (dry run)" if dry_run else f"→ {log.path}"
+    print(f"Reviewed {len(session)} of {len(queue)} queued: {summary or 'nothing'} {target}")
     return session

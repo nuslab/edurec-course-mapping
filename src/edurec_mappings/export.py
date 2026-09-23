@@ -9,9 +9,7 @@ from typing import Protocol
 from .browser import list_identity, subdivide, validate_rows
 from .models import (
     Document,
-    Filters,
     Listing,
-    ListPage,
     ListRow,
     Partition,
     Request,
@@ -81,13 +79,11 @@ class Extraction:
             if reported != total or current.capped:
                 raise RuntimeError("Search results changed during pagination")
             seen_pages.add(fingerprint)
-            self.data.list_pages.append(ListPage.of(partition, current))
             # Index into `current` each time: returning from a detail re-renders the
             # list with fresh row action IDs, and `current` is replaced accordingly.
             for index in range(len(current.rows)):
                 row = current.rows[index]
                 visited += 1
-                self.data.collection.scanned_rows += 1
                 if self.reassign_id and (row.reassigned_to or "").casefold() != self.reassign_id:
                     continue
                 self.collect(partition, row)
@@ -109,14 +105,12 @@ class Extraction:
             "sequence", identity.sequence
         ):
             raise RuntimeError("Mapping detail is outside the requested search partition")
-        meta = self.data.collection
         if request.request_id in self.known:
-            meta.duplicate_details += 1
+            self.data.duplicate_details += 1
             self.checkpoint(None)
             return
         self.known.add(request.request_id)
         self.data.requests.append(request)
-        meta.unique_requests = len(self.known)
         print(f"Extracted {len(self.known)} unique requests", flush=True)
         self.checkpoint(request)
 
@@ -132,12 +126,7 @@ def export(
     if terms is not None and not terms:
         raise ValueError("The configured term list must not be empty")
     data = document()
-    meta = data.collection
-    meta.filters = Filters(
-        reassign_id=reassign_id or None,
-        terms=terms,
-        rows=rows,
-    )
+    data.reassign_id, data.terms, data.row_limit = reassign_id or None, terms, rows
     reset(output)
     write = checkpoint(data, output)
     run = Extraction(site, data, write, reassign_id, rows)
@@ -156,8 +145,8 @@ def export(
             current = site.search(partition)
             validate_rows(partition, current.rows)
             total = current.span()[2]
-            audit = SearchAudit(criteria=partition, reported_rows=total, capped=current.capped)
-            meta.search_partitions.append(audit)
+            audit = SearchAudit(criteria=partition, reported_rows=total)
+            data.search_partitions.append(audit)
             print(
                 f"Search terms {partition.term_low:04d}-{partition.term_high:04d}: "
                 f"{total} rows{' (capped; subdividing)' if current.capped else ''}",
@@ -170,20 +159,16 @@ def export(
                 continue
             if run.scan(partition, current, audit):
                 audit.status = "row_limit_reached"
-                meta.status = "row_limit_reached"
-                meta.all_request_details_collected = False
+                data.status = "row_limit_reached"
                 write(None)
                 return data
             audit.status = "complete"
             write(None)
-        meta.status = "complete"
-        meta.all_request_details_collected = True
-        meta.related_mapping_completeness = "unverified"
+        data.status = "complete"
         write(None)
         return data
     except BaseException as exc:
-        meta.status = "interrupted"
-        meta.error = str(exc) or type(exc).__name__
-        meta.all_request_details_collected = False
+        data.status = "interrupted"
+        data.error = str(exc) or type(exc).__name__
         write(None)
         raise

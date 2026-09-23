@@ -7,7 +7,7 @@ import io
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
@@ -15,7 +15,7 @@ from playwright.sync_api import BrowserContext
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from pypdf import PdfReader
 
-from .models import Document, DocumentKind, Fetched, LinkedDocument, Request
+from .models import Document, Fetched, LinkedDocument, Request
 from .store import DOCUMENTS
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'　]+", re.I)
@@ -31,16 +31,6 @@ RENDER_SETTLE_MS = 5000
 Fetcher = Callable[[str], Fetched]
 Renderer = Callable[[str], bytes]
 """Loads a URL in a browser page, runs its scripts and returns the rendered HTML."""
-
-
-@dataclass
-class Extracted:
-    """Text recovered from a downloaded document."""
-
-    kind: DocumentKind
-    text: str
-    pages: int | None = None
-    title: str | None = None
 
 
 def find_urls(request: Request) -> list[str]:
@@ -106,7 +96,8 @@ def html_text(data: bytes, encoding: str | None = None) -> tuple[str, str | None
     return "\n".join(line for line in lines if line), title
 
 
-def extract_text(content_type: str | None, data: bytes) -> Extracted:
+def extract_text(url: str, content_type: str | None, data: bytes) -> LinkedDocument:
+    """The document's text, kind, title and page count; the status is left to the caller."""
     header = content_type or ""
     kind = header.split(";")[0].strip().lower()
     charset_match = re.search(r"charset=([\w-]+)", header, re.I)
@@ -114,14 +105,14 @@ def extract_text(content_type: str | None, data: bytes) -> Extracted:
     head = data[:256].lstrip().lower()
     if kind == "application/pdf" or data.startswith(b"%PDF-"):
         text, pages = pdf_text(data)
-        return Extracted("pdf", text, pages=pages)
+        return LinkedDocument(url, kind="pdf", text=text, pages=pages)
     if kind in ("text/html", "application/xhtml+xml") or head.startswith(
         (b"<!doctype html", b"<html")
     ):
         text, title = html_text(data, charset)
-        return Extracted("html", text, title=title)
+        return LinkedDocument(url, kind="html", text=text, title=title)
     if kind.startswith("text/"):
-        return Extracted("text", data.decode(charset or "utf-8", errors="replace"))
+        return LinkedDocument(url, kind="text", text=data.decode(charset or "utf-8", "replace"))
     raise ValueError(f"Unsupported content type: {kind or 'unknown'}")
 
 
@@ -130,49 +121,50 @@ def document_name(url: str) -> str:
     return f"{hashlib.sha256(url.encode()).hexdigest()[:16]}.txt"
 
 
-def rendered_text(url: str, render: Renderer, extracted: Extracted) -> Extracted:
+def rendered_text(target: str, render: Renderer, extracted: LinkedDocument) -> LinkedDocument:
     """Re-read a page in a browser when its HTML carried too little text to be the document.
 
     Single-page catalogues (Korea University, NYCU, TUMonline) serve a loading shell and
     fill it in with scripts; the rendered page replaces the shell only when it says more.
     A render failure keeps the shell, so the record never gets worse than the plain fetch.
     """
-    if extracted.kind != "html" or len(extracted.text) >= MIN_HTML_TEXT:
+    shell = extracted.text or ""
+    if extracted.kind != "html" or len(shell) >= MIN_HTML_TEXT:
         return extracted
     try:
-        text, title = html_text(render(url))
+        text, title = html_text(render(target))
     except Exception:
         return extracted
-    if len(text) <= len(extracted.text):
+    if len(text) <= len(shell):
         return extracted
-    return Extracted("html", text, title=title or extracted.title)
+    return replace(extracted, text=text, title=title or extracted.title)
 
 
 def fetch_document(url: str, fetch: Fetcher, render: Renderer | None = None) -> LinkedDocument:
     """Fetch one URL; every failure is recorded in the result rather than raised."""
     target = direct_url(url)
-    record = LinkedDocument(url=url)
     try:
         status, content_type, data = fetch(target)
         if status >= 400:
             raise ValueError(f"HTTP {status}")
         if len(data) > MAX_BYTES:
             raise ValueError(f"Document exceeds {MAX_BYTES} bytes")
-        extracted = extract_text(content_type, data)
+        record = extract_text(url, content_type, data)
         if render is not None:
-            extracted = rendered_text(target, render, extracted)
-        record.kind, record.title, record.pages = extracted.kind, extracted.title, extracted.pages
-        record.bytes = len(extracted.text.encode())
-        if not extracted.text:
-            record.status, record.error = "empty", "No extractable text"
-        elif record.bytes > MAX_TEXT_BYTES:
-            record.status = "too_large"
-            record.error = f"Extracted text exceeds {MAX_TEXT_BYTES} bytes"
-        else:
-            record.status, record.text = "fetched", extracted.text
-            record.path = f"{DOCUMENTS}/{document_name(url)}"
+            record = rendered_text(target, render, record)
     except Exception as error:
-        record.error = str(error).splitlines()[0] if str(error) else type(error).__name__
+        why = str(error).splitlines()[0] if str(error) else type(error).__name__
+        return LinkedDocument(url, error=why)
+    text, record.text = record.text or "", None
+    record.bytes = len(text.encode())
+    if not text:
+        record.status, record.error = "empty", "No extractable text"
+    elif record.bytes > MAX_TEXT_BYTES:
+        record.status = "too_large"
+        record.error = f"Extracted text exceeds {MAX_TEXT_BYTES} bytes"
+    else:
+        record.status, record.text = "fetched", text
+        record.path = f"{DOCUMENTS}/{document_name(url)}"
     return record
 
 
@@ -190,10 +182,6 @@ def fetch_documents(
             cache[url] = fetch_document(url, fetch, render)
         documents.append(replace(cache[url]))
     request.linked_documents = documents
-    partner = request.partner_course
-    if partner.supporting_url:
-        supporting = next((d for d in documents if d.url == partner.supporting_url), None)
-        partner.supporting_document_status = supporting.status if supporting else "not_fetched"
 
 
 def scrape(
@@ -209,7 +197,6 @@ def scrape(
     With `render`, HTML pages that arrive as script shells are re-read in a browser page.
     """
     cache: dict[str, LinkedDocument] = {}
-    data.collection.linked_documents = "fetched_when_present"
     for index, request in enumerate(data.requests, 1):
         fetch_documents(request, fetch, cache, render)
         print(f"Scraped URLs for {index}/{len(data.requests)} requests", flush=True)

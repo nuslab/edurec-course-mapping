@@ -47,7 +47,7 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(partner.assessments[0].weight_percent, "0.00")
         self.assertIn("&st=", partner.supporting_url or "")
         self.assertEqual(result.identity.student_id, "A0000000X")
-        self.assertTrue(result.many_to_one)
+        self.assertEqual(result.mapping_type, "Many to One")
         self.assertEqual(result.status, "Pending Approval")
 
     def test_group_identity_uses_student_and_not_sequence(self) -> None:
@@ -56,11 +56,11 @@ class ExtractionTests(unittest.TestCase):
         first = detail(soup)
         tag(soup, "N_EXSP_MOD_DT_TRNSFR_EQVLNCY_SEQ$0").string = "2"
         second = detail(soup)
-        self.assertEqual(first.group_id, second.group_id)
+        self.assertEqual(first.identity.mapping, second.identity.mapping)
         self.assertNotEqual(first.request_id, second.request_id)
         tag(soup, "N_EXSP_WKST_HDR_EMPLID").string = "TEST_STUDENT_B"
         third = detail(soup)
-        self.assertNotEqual(first.group_id, third.group_id)
+        self.assertNotEqual(first.identity.mapping, third.identity.mapping)
 
     def test_request_id_ignores_editable_content(self) -> None:
         soup = fixture("individual.html")
@@ -68,7 +68,7 @@ class ExtractionTests(unittest.TestCase):
         tag(soup, "N_EXSP_MOD_DT_N_MOD_COMMENTS$0").string = "Reviewer added a comment"
         tag(soup, "N_EXSP_MOD_DT_N_URL$0").string = "https://example.org/new-syllabus"
         second = detail(soup)
-        self.assertEqual((first.request_id, first.group_id), (second.request_id, second.group_id))
+        self.assertEqual(first.request_id, second.request_id)
 
     def test_missing_identity_is_rejected(self) -> None:
         soup = fixture("individual.html")
@@ -85,8 +85,7 @@ class ExtractionTests(unittest.TestCase):
             inventory = yaml.safe_load((run / "inventory.yaml").read_text())
             self.assertEqual(inventory, data.inventory())
             self.assertNotIn("requests", inventory, "Requests live in one file each")
-            self.assertEqual(inventory["schema_version"], 4)
-            self.assertEqual(inventory["mapping_groups"][0]["completeness"], "unverified")
+            self.assertEqual(inventory["schema_version"], 5)
             (path,) = (run / "requests").iterdir()
             self.assertEqual(path.name, f"{data.requests[0].request_id}.yaml")
             content = path.read_text()

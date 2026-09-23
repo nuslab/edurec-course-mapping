@@ -156,7 +156,7 @@ class RunTests(unittest.TestCase):
             self.mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
         result = self.mocks["export"].return_value
-        result.collection.status, result.requests = "complete", [1, 2]
+        result.status, result.requests = "complete", [1, 2]
         self.context = mock.MagicMock()
 
     def assert_dialog_hook_removed(self) -> None:

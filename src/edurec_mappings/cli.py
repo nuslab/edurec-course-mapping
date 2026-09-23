@@ -330,7 +330,7 @@ def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
             rows=args.rows,
             terms=args.terms,
         )
-        status, count = result.collection.status, len(result.requests)
+        status, count = result.status, len(result.requests)
         print(f"{status}: {count} requests → {args.run}")
         if args.scrape_urls:
             fetch = playwright_fetcher(context, args.timeout_ms)

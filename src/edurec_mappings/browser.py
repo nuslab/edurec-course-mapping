@@ -23,7 +23,6 @@ from .models import (
     VERDICT_COLOURS,
     Clicked,
     Decision,
-    Left,
     Listing,
     ListRow,
     Outcome,
@@ -66,6 +65,7 @@ BUTTONS: dict[str, Verdict] = {
 }
 """The detail page's action buttons; Cancel posts `#ICList` instead of its own id."""
 REVIEWER_ACTIONS = frozenset({*BUTTONS, "#ICList"})
+SKIPPED = "skipped by the reviewer"
 CAP = 300  # Observed server cap; exactly 300 rows is treated as capped.
 ROW_ACTION = re.compile(r"#ICRow\d+")
 SCRIPT = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
@@ -312,8 +312,6 @@ class EduRec:
         if any(a and a != b for a, b in checks):
             raise RuntimeError("Detail does not match the selected row")
         request.term_code = row.term_code
-        request.submitted_at = row.submitted_at
-        request.reassigned_to = row.reassigned_to
         return request
 
     def back(self) -> Listing:
@@ -375,8 +373,8 @@ class Reviewer(EduRec):
     five buttons. Clicking a panel tab only previews its pane; the tab whose
     "Select" button was pressed (it then reads "Selected" and is disabled)
     decides which comment is in the box and which button is outlined. The hook
-    only observes: it records the button id, the comment box's value and the
-    selected tab, asks for confirmation when
+    only observes: it records the button id and the comment box's value, asks
+    for confirmation when
     the verdict differs from the selected tab's (offering to select the
     fallback when the button matches it), and in a dry run the action buttons
     are disabled and their clicks blocked outright. The selected and viewed
@@ -394,13 +392,13 @@ class Reviewer(EduRec):
     panel, the hook and the dry-run state. A state change without a recognised
     post is therefore not an error: while the detail still shows as pending the
     panel and hook are re-installed (the comment box keeps its current text) and
-    the wait resumes; once the detail is gone the outcome is `Left`.
+    the wait resumes; once the detail is gone the outcome is a `Skipped`.
     """
 
     prior_comment: str = ""
     install: Install
 
-    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> dict[Tab, str]:
+    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> None:
         frame = self.frame()
         self.prior_comment = frame.locator(f'[id="{COMMENTS}"]').input_value()
         prefills = decision.prefills(self.prior_comment)
@@ -421,7 +419,6 @@ class Reviewer(EduRec):
             comments=COMMENTS,
         )
         run(frame, "install", **self.install, fresh=True)
-        return prefills
 
     def comment(self, value: str) -> None:
         # No inline onchange: dispatch the events PeopleSoft's delegated handlers listen for.
@@ -452,12 +449,13 @@ class Reviewer(EduRec):
                 skipped = run(frame, "skipped")
                 if skipped is not None:
                     self.comment(self.prior_comment)
-                    return Skipped(str(skipped))
+                    why = str(skipped).strip()
+                    return Skipped(f"skipped by the reviewer: {why}" if why else SKIPPED)
                 if seen:
                     self.settle(seen[0], previous)
                     break
                 if not self.pending_detail():
-                    return Left()
+                    return Skipped("reviewer left the page")
                 run(frame, "install", **self.install, fresh=False)
                 previous = current
         finally:
@@ -465,7 +463,7 @@ class Reviewer(EduRec):
         form = parse_qs(seen[0].request.post_data or "")
         hooked = run(frame, "clicked")
         if isinstance(hooked, dict):
-            return Clicked(form["ICAction"][0], hooked["comment"], hooked["tab"])
+            return Clicked(form["ICAction"][0], hooked["comment"])
         return Clicked(form["ICAction"][0], form.get(COMMENTS, [None])[0])
 
     def status(self, request: Request) -> str | None:
