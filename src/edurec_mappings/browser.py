@@ -27,8 +27,10 @@ from .models import (
     RangeField,
     Request,
     Skipped,
+    Tab,
     Verdict,
     as_dict,
+    display,
 )
 from .parse import DETAIL, GRID, NEXT, VIEW_ALL, detail, digest, expand_action, listing
 
@@ -59,6 +61,13 @@ BUTTONS: dict[str, Verdict] = {
     "N_SR_EXT_STD_DW_MORE_PB": "request for more information",
 }
 """The detail page's action buttons; Cancel posts `#ICList` instead of its own id."""
+VERDICT_COLOURS: dict[Verdict, str] = {
+    "approve": "#2e7d32",
+    "reject": "#c62828",
+    "request remapping": "#ef6c00",
+    "request for more information": "#ef6c00",
+}
+"""Colour of the verdict pill and of the matching EduRec button's outline."""
 REVIEWER_ACTIONS = frozenset({*BUTTONS, "#ICList"})
 CAP = 300  # Observed server cap; exactly 300 rows is treated as capped.
 TERM_PATTERN = re.compile(r"\d{4}")
@@ -76,52 +85,122 @@ SIGNALLED = """(old) => {
     const state = document.getElementById('ICStateNum');
     return !!(apply && apply.skipped) || !!(state && state.value !== old);
 }"""
-SKIPPED = "() => !!(window.__edurecApply || {}).skipped"
+SKIPPED = (
+    "() => { const a = window.__edurecApply || {}; return a.skipped ? a.state.skipReason : null; }"
+)
 SET_COMMENT = """({id, value}) => {
     const box = document.getElementById(id);
     if (!box) throw new Error('Comment box not found');
     box.value = value;
     for (const type of ['input', 'change']) box.dispatchEvent(new Event(type, {bubbles: true}));
 }"""
-INSTALL = """({panel, buttons, cancel, recommended, verdict, dryRun, comments}) => {
-    window.__edurecApply?.unhook();
+INSTALL = """({panel, buttons, cancel, verdicts, prefills, colours, dryRun, comments, fresh}) => {
+    const prior = window.__edurecApply;
+    prior?.unhook();
     const hooks = [];
+    const listen = (target, type, handler) => {
+        target.addEventListener(type, handler, true);
+        hooks.push([target, type, handler]);
+    };
+    const initial = {selected: 'recommended', viewed: 'recommended', scrollTop: 0, skipReason: ''};
+    const state = !fresh && prior ? prior.state : initial;
     const apply = window.__edurecApply = {
-        skipped: false, clicked: null,
-        unhook: () => hooks.forEach(([b, h]) => b.removeEventListener('click', h, true)),
+        skipped: false, clicked: null, state,
+        unhook: () => hooks.forEach(([t, type, h]) => t.removeEventListener(type, h, true)),
     };
     const box = document.getElementById(comments);
     document.getElementById('edurec-apply-panel')?.remove();
-    const div = document.createElement('div');
-    div.id = 'edurec-apply-panel';
-    div.innerHTML = panel;
-    document.body.appendChild(div);
-    document.getElementById('edurec-apply-skip').onclick = () => { apply.skipped = true; };
-    for (const id of [...buttons, cancel]) {
+    const host = document.createElement('div');
+    host.id = 'edurec-apply-panel';
+    const root = host.attachShadow({mode: 'open'});
+    root.innerHTML = panel;
+    document.body.appendChild(host);
+    const $ = selector => root.querySelector(selector);
+    const $$ = selector => [...root.querySelectorAll(selector)];
+    const block = event => { event.preventDefault(); event.stopImmediatePropagation(); };
+
+    const names = {recommended: 'Recommended', fallback: 'Fallback'};
+    const modified = () => !!box && box.value.trim() !== (prefills[state.selected] || '').trim();
+    const mark = () => { for (const el of $$('.modified')) el.hidden = !modified(); };
+    const fill = value => {
+        if (!box) return;
+        box.value = value;
+        for (const type of ['input', 'change']) box.dispatchEvent(new Event(type, {bubbles: true}));
+        mark();
+    };
+    // Viewing a tab shows its pane; selecting one decides the comment, outline and pill.
+    const view = tab => {
+        state.viewed = tab;
+        for (const el of $$('.tab, .pane')) el.classList.toggle('active', el.dataset.tab === tab);
+    };
+    const choose = tab => {
+        state.selected = tab;
+        for (const el of $$('.pill[data-tab]')) {
+            el.classList.toggle('active', el.dataset.tab === tab);
+        }
+        for (const el of $$('.pane')) el.classList.toggle('selected', el.dataset.tab === tab);
+        for (const el of $$('.select')) {
+            el.disabled = el.closest('.pane').dataset.tab === tab;
+            el.textContent = el.disabled ? 'Selected' : 'Select';
+        }
+        for (const [id, verdict] of Object.entries(buttons)) {
+            const button = document.getElementById(id);
+            const active = verdict === verdicts[tab];
+            if (button) button.style.outline = active ? `3px solid ${colours[verdict]}` : '';
+        }
+        mark();
+    };
+    const select = tab => {
+        if (tab === state.selected) return;
+        const question = `The comment box differs from the ${names[state.selected]} comment. ` +
+            `Replace it with the ${names[tab]} comment?`;
+        if (modified() && !window.confirm(question)) return;
+        choose(tab);
+        fill(prefills[tab]);
+    };
+
+    for (const tab of $$('.tab')) tab.onclick = () => view(tab.dataset.tab);
+    for (const el of $$('.select')) el.onclick = () => select(el.closest('.pane').dataset.tab);
+    for (const reset of $$('.reset')) reset.onclick = () => fill(prefills[state.selected]);
+    if (box) listen(box, 'input', mark);
+    const reason = $('#reason');
+    reason.value = state.skipReason;
+    reason.oninput = () => { state.skipReason = reason.value; };
+    $('#skip').onclick = () => { apply.skipped = true; };
+    choose(state.selected);
+    view(state.viewed);
+    const body = $('#body');  // Scroll after the tab is shown, or anchoring shifts the offset.
+    body.scrollTop = state.scrollTop;
+    body.onscroll = () => { state.scrollTop = body.scrollTop; };
+
+    for (const id of [...Object.keys(buttons), cancel]) {
         const button = document.getElementById(id);
         if (!button) continue;
-        if (id !== cancel) {
-            button.disabled = dryRun;
-            button.style.outline = id === recommended ? '3px solid #2e7d32' : '';
-        }
-        const hook = event => {
-            if (dryRun && buttons.includes(id)) {
-                event.preventDefault();
-                event.stopImmediatePropagation();
+        if (id !== cancel) button.disabled = dryRun;
+        listen(button, 'click', event => {
+            const verdict = buttons[id];
+            if (dryRun && verdict) {
+                block(event);
                 window.alert('Dry run: nothing is submitted');
                 return;
             }
-            if (buttons.includes(id) && id !== recommended) {
-                if (!window.confirm(`Recommended: ${verdict}. Submit ${button.value} anyway?`)) {
-                    event.preventDefault();
-                    event.stopImmediatePropagation();
-                    return;
+            if (verdict && verdict !== verdicts[state.selected]) {
+                if (verdict === verdicts.fallback) {
+                    const question =
+                        'This matches the fallback. Switch to the fallback comment and submit?';
+                    if (!window.confirm(question)) return block(event);
+                    choose('fallback');
+                    fill(prefills.fallback);
+                } else {
+                    const label =
+                        state.selected === 'fallback' ? 'Fallback selected' : 'Recommended';
+                    const question =
+                        `${label}: ${verdicts[state.selected]}. Submit ${button.value} anyway?`;
+                    if (!window.confirm(question)) return block(event);
                 }
             }
-            apply.clicked = {id, comment: box ? box.value : null};
-        };
-        button.addEventListener('click', hook, true);
-        hooks.push([button, hook]);
+            apply.clicked = {id, comment: box ? box.value : null, tab: state.selected};
+        });
     }
 }"""
 
@@ -257,11 +336,13 @@ class EduRec:
             operator, value = "between", str(low)
         select = self.control(field + "$op")
         selected_label = select.locator("option:checked").inner_text().strip()
-        if operator == "between" and selected_label != operator:
+        # Entering or leaving "between" makes PeopleSoft rebuild the form (the
+        # "$to" field appears or disappears); fill only after that postback settles.
+        if selected_label != operator and "between" in (operator, selected_label):
             self.transition(
                 PREFIX + field + "$op",
                 trigger=lambda: select.select_option(label=operator),
-                target=PREFIX + field + "$to",
+                target=PREFIX + field + "$to" if operator == "between" else None,
             )
         elif selected_label != operator:
             select.select_option(label=operator)
@@ -398,11 +479,19 @@ def posted(actions: Collection[str]) -> Callable[[Response], bool]:
 class Applier(EduRec):
     """Assists the reviewer on a detail page; the reviewer presses EduRec's own buttons.
 
-    How the click is detected: `prepare` injects the decision panel and a
-    capture-phase click hook on the five buttons. The hook only observes: it
-    records the button id and the comment box's value, asks for confirmation
-    when the verdict differs from the recommendation, and in a dry run the
-    action buttons are disabled and their clicks blocked outright. `await_action`
+    How the click is detected: `prepare` injects the decision panel (in a shadow
+    root, so page CSS cannot restyle it) and a capture-phase click hook on the
+    five buttons. Clicking a panel tab only previews its pane; the tab whose
+    "Select" button was pressed (it then reads "Selected" and is disabled)
+    decides which comment is in the box and which button is outlined. The hook
+    only observes: it records the button id, the comment box's value and the
+    selected tab, asks for confirmation when
+    the verdict differs from the selected tab's (offering to select the
+    fallback when the button matches it), and in a dry run the action buttons
+    are disabled and their clicks blocked outright. The selected and viewed
+    tabs, the panel's scroll position and a typed skip reason live on
+    `window.__edurecApply.state` and survive a re-install.
+    `await_action`
     collects the page's responses and waits until either the panel's Skip flag
     is set or `ICStateNum` changes, which only a PeopleSoft postback does. The
     posted `ICAction` of the collected response, not the hook, says which button
@@ -420,22 +509,29 @@ class Applier(EduRec):
     prior_comment: str = ""
     install: dict[str, object]
 
-    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> str:
+    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> dict[Tab, str]:
         frame = self.frame()
         self.prior_comment = frame.locator(f'[id="{COMMENTS}"]').input_value()
-        prefilled = decision.prefill(self.prior_comment)
-        self.comment(prefilled)
+        prefills = decision.prefills(self.prior_comment)
+        self.comment(prefills["recommended"])
+        # The hook compares and quotes verdicts in their display form only.
+        verdicts = {
+            "recommended": display(decision.verdict),
+            "fallback": display(decision.fallback_verdict) if decision.fallback_verdict else None,
+        }
         self.install = {
             "panel": panel,
-            "buttons": list(BUTTONS),
+            "buttons": {id: display(verdict) for id, verdict in BUTTONS.items()},
             "cancel": CANCEL,
-            "recommended": button_for(decision.verdict),
-            "verdict": decision.verdict,
+            "verdicts": verdicts,
+            "prefills": prefills,
+            "colours": {display(verdict): colour for verdict, colour in VERDICT_COLOURS.items()},
             "dryRun": dry_run,
             "comments": COMMENTS,
+            "fresh": False,
         }
-        frame.evaluate(INSTALL, self.install)
-        return prefilled
+        frame.evaluate(INSTALL, {**self.install, "fresh": True})
+        return prefills
 
     def comment(self, value: str) -> None:
         # No inline onchange: dispatch the events PeopleSoft's delegated handlers listen for.
@@ -463,9 +559,10 @@ class Applier(EduRec):
             while True:
                 frame.wait_for_function(SIGNALLED, arg=previous, timeout=0)
                 current = self.state()  # Read before `seen`: a response precedes its DOM update.
-                if frame.evaluate(SKIPPED):
+                skipped = frame.evaluate(SKIPPED)
+                if skipped is not None:
                     self.comment(self.prior_comment)
-                    return Skipped()
+                    return Skipped(str(skipped))
                 if seen:
                     self.settle(seen[0], previous)
                     break
@@ -477,8 +574,9 @@ class Applier(EduRec):
             frame.page.remove_listener("response", collect)
         form = parse_qs(seen[0].request.post_data or "")
         hooked = frame.evaluate("() => (window.__edurecApply || {}).clicked")
-        comment = hooked["comment"] if isinstance(hooked, dict) else form.get(COMMENTS, [None])[0]
-        return Clicked(form["ICAction"][0], comment)
+        if isinstance(hooked, dict):
+            return Clicked(form["ICAction"][0], hooked["comment"], hooked["tab"])
+        return Clicked(form["ICAction"][0], form.get(COMMENTS, [None])[0])
 
     def status(self, request: Request) -> str | None:
         """The request's live status: from the open detail, or after reopening it.

@@ -10,16 +10,31 @@ from playwright.sync_api import sync_playwright
 from edurec_mappings.anonymize import anonymize
 from edurec_mappings.apply import (
     APPLIED,
+    OVERLAP_FAIR,
+    OVERLAP_GOOD,
+    UNVERIFIED,
+    VANISHED,
     Item,
+    Progress,
     apply,
     comment_problem,
+    comment_source,
+    course_names,
     load_applied,
     load_queue,
+    overlap_colour,
     panel_html,
     select,
     stale_reason,
 )
-from edurec_mappings.browser import BUTTONS, CANCEL, COMMENTS, Applier, NotInQueueError, button_for
+from edurec_mappings.browser import (
+    BUTTONS,
+    CANCEL,
+    COMMENTS,
+    Applier,
+    NotInQueueError,
+    button_for,
+)
 from edurec_mappings.cli import DOWNLOAD_TABLES, forget_downloads, main, parse_apply_args
 from edurec_mappings.models import (
     NOT_IN_QUEUE,
@@ -35,6 +50,22 @@ from edurec_mappings.parse import DETAIL, document, dump, hydrate, save
 from tests.test_extract import records
 
 STARTED = "2026-09-22T10:00:00+00:00"
+PROGRESS = Progress(position=3, total=12, applied=5, requests=104)
+GREEN, AMBER, RED = "#2e7d32", "#ef6c00", "#c62828"
+FALLBACK = {
+    "fallback_verdict": "request remapping",
+    "fallback_comment": "Planning is missing. Consider remapping to CS5242.",
+    "fallback_rationale": "Overlap is close to the 70% <threshold>.",
+}
+
+
+def ordered(html, *needles):
+    """Assert every needle occurs in `html`, in the given order."""
+    position = -1
+    for needle in needles:
+        found = html.find(needle, position + 1)
+        assert found > position, f"{needle!r} missing or out of order"
+        position = found
 
 
 def decision(request, verdict="approve", **overrides):
@@ -80,6 +111,7 @@ class FakeSite:
         self.outcomes = outcomes
         self.live = live or {}
         self.status_after = status_after
+        """A string, or an exception to raise from `status`."""
         self.opened = []
         self.prepared = []
         self.current = ""
@@ -97,13 +129,15 @@ class FakeSite:
     def prepare(self, decision, panel, dry_run):
         self.prepared.append((decision.request_id, panel, dry_run))
         live = self.live.get(self.current)
-        return decision.prefill(live.comments if live else None)
+        return decision.prefills(live.comments if live else None)
 
     def await_action(self):
         outcome = self.outcomes[self.current]
         return outcome() if callable(outcome) else outcome
 
     def status(self, request):
+        if isinstance(self.status_after, Exception):
+            raise self.status_after
         return self.status_after
 
 
@@ -245,16 +279,16 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(BUTTONS["N_SR_EXT_STD_DW_REQUEST_BTN"], "request remapping")
         self.assertNotIn(CANCEL, BUTTONS)
 
-    def test_panel_html_shows_the_decision_and_escapes_content(self):
+    def test_panel_html_shows_the_decision_in_order_and_escapes_content(self):
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             queue, _ = load_queue(run, decisions)
             item = next(i for i in queue if i.request.request_id == requests[0].request_id)
             item.decision.remap_target = "CS5242"
             item.decision.remap_analysis = "Better fit <b>"
-            item.decision.fallback_verdict = "request remapping"
-            item.decision.fallback_comment = "Planning is missing. Consider remapping to CS5242."
-            item.decision.fallback_rationale = "Overlap is close to the 70% <threshold>."
+            item.decision.extra_in_pu = ["Robotics"]
+            for key, value in FALLBACK.items():
+                setattr(item.decision, key, value)
             sibling = requests[1].request_id
             log = [
                 Applied(
@@ -269,35 +303,159 @@ class ApplyTests(unittest.TestCase):
                     dry_run=False,
                 )
             ]
-            html = panel_html(item, 3, 12, log, dry_run=True)
-            for expected in (
-                requests[0].request_id,
+            courses = {sibling: "CS 2 (PU) -> CS3243"}
+            html = panel_html(
+                item, PROGRESS, log, dry_run=True, existing="kept <below>", courses=courses
+            )
+            ordered(
+                html,
+                "<style>",
+                f'class="pill active" data-tab="recommended" style="background:{GREEN}"',
+                ">Approve<",
+                f'class="pill" data-tab="fallback" style="background:{AMBER}"',
+                ">Request Remapping<",
+                f'style="background:{GREEN}">85% Overlap<',
                 "CS 1 (PU) -&gt; CS3243",
-                "3 of 12",
-                "approve",
-                "85%",
-                "high",
-                "Search",
-                "Planning",
-                "Weight of exam &lt; 50%",
-                "CS5242",
-                "Better fit &lt;b&gt;",
-                "Fallback if you disagree",
-                "request remapping",
-                "Planning is missing. Consider remapping to CS5242.",
-                "70% &lt;threshold&gt;",
-                "search &amp; &lt;planning&gt;",
-                sibling,
-                "reject",
+                'class="bar"',
+                "width:25%",
+                "3 of 12 this session &middot; 5 of 104 overall",
                 "Dry run",
-                "different action",
-                'id="edurec-apply-skip"',
-                "fresh",
-            ):
-                self.assertIn(expected, html)
-            self.assertNotIn("<b>", html)
+                'class="tabs"',
+                ">Recommended<",
+                ">Fallback<",
+                'class="pane active selected" data-tab="recommended"',
+                "<p><b>Decision:</b> Approve</p>",
+                f'<p><span class="pill" style="background:{GREEN}">High Confidence</span></p>',
+                "search &amp; &lt;planning&gt;",  # the pane holds only the comment
+                'class="tools"',
+                "Reset comment",
+                '<button type="button" class="select" disabled>Selected</button>',
+                'class="modified"',
+                'class="pane" data-tab="fallback"',
+                "<p><b>Decision:</b> Request Remapping</p>",
+                "70% &lt;threshold&gt;",  # the rationale explains the fallback, so it stays with it
+                "Planning is missing. Consider remapping to CS5242.",
+                "Reset comment",
+                '<button type="button" class="select">Select</button>',
+                "Previous comments",
+                "kept &lt;below&gt;",
+                "Remap",
+                "<p><b>Target:</b> CS5242</p>",
+                "Better fit &lt;b&gt;",
+                "Concerns",
+                "Weight of exam &lt; 50%",
+                "Overlap",
+                "Search",
+                "Missing from PU",
+                "Planning",
+                "Extra in PU",
+                "Robotics",
+                "Siblings",
+                "CS 2 (PU) -&gt; CS3243",
+                "reject",
+                "different action",  # warning badge on the sibling entry only
+                'id="reason"',
+                'id="skip"',
+            )
+            self.assertEqual(html.count("pill active"), 1, "one verdict pill, in the header only")
+            self.assertEqual(html.count('class="pill" data-tab'), 1)
+            self.assertEqual(html.count("different action"), 1)
+            self.assertEqual(html.count("Target:"), 1)
+            self.assertEqual(html.count("Better fit"), 1)
+            self.assertEqual(html.count('class="select"'), 2)
+            self.assertEqual(html.count(">Selected<"), 1)
+            self.assertEqual(html.count("Confidence<"), 1, "confidence sits in the pane only")
+            self.assertLess(html.index("Confidence<"), html.index("search &amp;"))
+            self.assertGreater(html.index("Confidence<"), html.index("</header>"))
+            self.assertEqual(html.count('class="pane'), 2)
+            self.assertLess(html.index("Reset comment"), html.index("Target:"))
+            self.assertNotIn("remapping<", html, "verdicts are shown in title case")
+            self.assertNotIn("Details", html)
+            self.assertNotIn("decided", html)
+            self.assertNotIn(requests[0].request_id, html)
+            self.assertNotIn(sibling, html)
+            self.assertNotIn('class="selected"', html)
+            self.assertNotIn("Better fit <b>", html)
             self.assertNotIn("<planning>", html)
-            self.assertNotIn("Dry run", panel_html(item, 1, 1, [], dry_run=False))
+            self.assertNotIn("fresh", html)
+            self.assertNotIn("Dry run", panel_html(item, PROGRESS, [], dry_run=False))
+
+    def test_panel_without_fallback_verdict_offers_no_selection_and_names_siblings_by_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, decisions, requests = make_run(directory)
+            queue, _ = load_queue(run, decisions)
+            item = next(i for i in queue if i.request.request_id == requests[0].request_id)
+            item.decision.fallback_rationale = "No defensible alternative."
+            item.decision.concerns = []
+            html = panel_html(item, PROGRESS, [], dry_run=False)
+            ordered(
+                html,
+                'class="tabs"',
+                ">Recommended<",
+                ">Fallback<",
+                'class="pane active selected" data-tab="recommended"',
+                "<b>Decision:</b> Approve",
+                ">Selected<",
+                'class="pane" data-tab="fallback"',
+                "<p>No fallback</p>",
+                "No defensible alternative.",
+                "Siblings",
+            )
+            self.assertEqual(html.count('class="pill'), 3, "verdict, overlap and confidence")
+            self.assertEqual(html.count('class="select"'), 1, "the fallback is unselectable")
+            self.assertEqual(html.count("Reset comment"), 1)
+            self.assertNotIn("Decision:</b> No", html)
+            self.assertNotIn("Remap", html)
+            self.assertNotIn("Concerns", html)
+            item.decision.fallback_rationale = None
+            self.assertIn("No fallback", panel_html(item, PROGRESS, [], dry_run=False))
+            self.assertIn("Previous comments", panel_html(item, PROGRESS, [], False, existing="x"))
+            self.assertNotIn("Previous comments", html)
+            self.assertIn(f"{requests[1].request_id}: not yet applied", html)
+            self.assertNotIn("different action", html)
+
+    def test_header_badges_colour_confidence_and_overlap(self):
+        _, request = records()[0]
+        self.assertEqual((OVERLAP_GOOD, OVERLAP_FAIR), (70, 40))
+        self.assertEqual(overlap_colour(OVERLAP_GOOD), GREEN)
+        self.assertEqual(overlap_colour(OVERLAP_GOOD - 1), AMBER)
+        self.assertEqual(overlap_colour(OVERLAP_FAIR), AMBER)
+        self.assertEqual(overlap_colour(OVERLAP_FAIR - 1), RED)
+        for confidence, overlap, colours in [
+            ("medium", 55, (AMBER, AMBER)),
+            ("low", 20, (RED, RED)),
+        ]:
+            advice = decision(request, decision_confidence=confidence, overlap_percentage=overlap)
+            html = panel_html(Item(advice, request), PROGRESS, [], dry_run=False)
+            badge = f'style="background:{colours[0]}">{confidence.title()} Confidence<'
+            self.assertIn(badge, html)
+            self.assertGreater(html.index(badge), html.index("</header>"), "not in the header")
+            self.assertIn(f'style="background:{colours[1]}">{overlap}% Overlap<', html)
+
+    def test_course_names_come_from_the_decision_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, decisions, requests = make_run(directory, count=2)
+            names = course_names(decisions)
+            self.assertEqual(names, {r.request_id: "CS 1 (PU) -> CS3243" for r in requests})
+
+    def test_comment_source_follows_the_selected_tab(self):
+        _, request = records()[0]
+        advice = decision(request, **FALLBACK)
+        prefills = advice.prefills("older")
+        self.assertEqual(list(prefills), ["recommended", "fallback"])
+        self.assertEqual(prefills["fallback"], FALLBACK["fallback_comment"] + "\n\nolder")
+        self.assertEqual(
+            comment_source(prefills["recommended"], "recommended", prefills), "recommended"
+        )
+        self.assertEqual(
+            comment_source(prefills["fallback"] + "\n", "fallback", prefills), "fallback"
+        )
+        self.assertEqual(comment_source(prefills["fallback"], "recommended", prefills), "edited")
+        self.assertEqual(comment_source("typed", "fallback", prefills), "edited")
+        # Without the hook's report the text alone decides.
+        self.assertEqual(comment_source(prefills["fallback"], None, prefills), "fallback")
+        self.assertEqual(comment_source(None, None, prefills), "edited")
+        self.assertEqual(list(decision(request).prefills(None)), ["recommended"])
 
     def test_loop_logs_every_outcome_and_stops_when_unverified(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,7 +469,7 @@ class ApplyTests(unittest.TestCase):
                 {
                     ids[0]: Clicked(approve, decision(requests[0]).comment),
                     ids[1]: Clicked(reject, edited),
-                    ids[2]: Skipped(),
+                    ids[2]: Skipped("busy"),
                 },
                 live={ids[3]: stale},
             )
@@ -319,12 +477,15 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(len(site.prepared), 3, "The stale request never gets a panel")
             self.assertEqual([log[i].action for i in ids], ["approve", "reject", "skip", "skip"])
             self.assertEqual(log[ids[0]].comment_edited, False)
+            self.assertEqual(log[ids[0]].comment_source, "recommended")
             self.assertEqual(log[ids[1]].comment_edited, True)
+            self.assertEqual(log[ids[1]].comment_source, "edited")
             self.assertEqual(log[ids[1]].comment_submitted, edited)
+            self.assertIsNone(log[ids[2]].comment_source)
+            self.assertEqual(log[ids[2]].reason, "skipped by the reviewer: busy")
             self.assertEqual(
                 (log[ids[0]].status_before, log[ids[0]].status_after), (PENDING, "Approved")
             )
-            self.assertIn("reviewer", log[ids[2]].reason or "")
             self.assertIn("Approved", log[ids[3]].reason or "")
             self.assertEqual({e.request_id: e for e in load_applied(decisions / APPLIED)}, log)
 
@@ -334,7 +495,11 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(sorted(site.opened), sorted(ids[2:]))
             self.assertEqual({e.action for e in second.values()}, {"skip"})
             self.assertIn("Cancel", second[ids[2]].reason or "")
+            self.assertEqual(second[ids[3]].reason, "skipped by the reviewer")
             self.assertEqual(len(load_applied(decisions / APPLIED)), 6)
+            panels = [panel for _, panel, _ in site.prepared]
+            ordered(panels[0], "width:50%", "1 of 2 this session &middot; 2 of 4 overall")
+            ordered(panels[1], "width:100%", "2 of 2 this session &middot; 2 of 4 overall")
 
     def test_dry_run_and_unverified_submission(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -370,18 +535,53 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(log[ids[1]].reason, "no longer in the approval queue")
             self.assertIsNone(log[ids[1]].status_before)
             self.assertEqual(sorted(r for r, _, _ in site.prepared), sorted([ids[0], ids[2]]))
+            self.assertEqual(log[ids[1]].reason, VANISHED)
+            # A vanished request is final: the next session neither opens nor re-logs it.
+            site = FakeSite({ids[0]: Skipped(), ids[2]: Skipped()})
+            second = apply(site, run, decisions)
+            self.assertEqual(sorted(site.opened), sorted([ids[0], ids[2]]))
+            self.assertEqual(sorted(e.request_id for e in second), sorted([ids[0], ids[2]]))
+            self.assertEqual(len(load_applied(decisions / APPLIED)), 5)
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 apply(FakeSite({}, live=dict.fromkeys(ids, RuntimeError("boom"))), run, decisions)
+
+    def test_click_is_on_record_before_verification_and_survives_a_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, decisions, requests = make_run(directory, count=2)
+            ids = [r.request_id for r in requests]
+            comment = decision(requests[0]).comment
+            outcomes = {i: Clicked(button_for("approve"), comment) for i in ids}
+            site = FakeSite(outcomes, status_after=RuntimeError("browser went away"))
+            with self.assertRaisesRegex(RuntimeError, "browser went away"):
+                apply(site, run, decisions)
+            (entry,) = load_applied(decisions / APPLIED)
+            first, other = site.opened[0], next(i for i in ids if i != site.opened[0])
+            self.assertEqual((entry.request_id, entry.action), (first, "approve"))
+            self.assertEqual(entry.comment_submitted, comment)
+            self.assertEqual(entry.reason, f"{UNVERIFIED}: browser went away")
+            self.assertIsNone(entry.status_after)
+            # The provisional entry is final: the next session offers only the other request.
+            site = FakeSite(outcomes)
+            log = apply(site, run, decisions)
+            self.assertEqual([e.request_id for e in log], [other])
+            self.assertEqual(site.opened, [other])
+            entries = load_applied(decisions / APPLIED)
+            self.assertEqual([e.request_id for e in entries], [first, other])
+            self.assertEqual(entries[1].reason, None)
+            self.assertEqual(entries[1].status_after, "Approved")
 
     def test_request_that_left_the_queue_counts_as_verified(self):
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=1)
             remap = button_for("request remapping")
-            site = FakeSite(
-                {requests[0].request_id: Clicked(remap, "c")}, status_after=NOT_IN_QUEUE
-            )
+            advice = decision(requests[0], **FALLBACK)
+            (decisions / f"{requests[0].request_id}.yaml").write_text(dump(advice.to_dict()))
+            outcome = Clicked(remap, advice.prefills(None)["fallback"], "fallback")
+            site = FakeSite({requests[0].request_id: outcome}, status_after=NOT_IN_QUEUE)
             (entry,) = apply(site, run, decisions)
             self.assertEqual(entry.action, "request remapping")
+            self.assertEqual(entry.comment_source, "fallback")
+            self.assertFalse(entry.comment_edited)
             self.assertEqual(entry.status_after, NOT_IN_QUEUE)
             self.assertIsNone(entry.reason)
 
@@ -418,7 +618,7 @@ class ApplyTests(unittest.TestCase):
         page_html = f"""<html><body><form name="win0" id="N_EXSP_MOD_APPR">
             <input id="ICStateNum" value="1">{fields}
             <textarea id="{COMMENTS}">prior</textarea>{buttons}
-            </form><script>
+            </form><style>button, div {{ color: red !important; }}</style><script>
             window.changes = 0;
             document.addEventListener('change', () => window.changes++);
             window.isLoaderInProcess = () => false;
@@ -433,9 +633,12 @@ class ApplyTests(unittest.TestCase):
             }};
             </script></body></html>"""
         _, request = records()[0]
-        advice = decision(request)
-        panel = '<button id="edurec-apply-skip">Skip</button>'
+        # Enough overlap lines to make the panel body scroll in a 720px-high viewport.
+        advice = decision(request, overlap=[f"Topic {n}" for n in range(80)], **FALLBACK)
+        panel = panel_html(Item(advice, request), PROGRESS, [], dry_run=False)
         approve, reject = button_for("approve"), button_for("reject")
+        remap = button_for("request remapping")
+        recommended, fallback = advice.prefills("prior").values()
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_context().new_page()
@@ -444,6 +647,18 @@ class ApplyTests(unittest.TestCase):
             )
             page.goto("https://local.test/detail")
             site = Applier(page.context)
+            box = page.locator(f'[id="{COMMENTS}"]')
+            messages, posts, answers = [], [], []  # type: list[str], list[object], list[bool]
+
+            def answer(dialog):
+                messages.append(dialog.message)
+                if answers and answers.pop(0):
+                    dialog.accept()
+                else:
+                    dialog.dismiss()
+
+            page.on("dialog", answer)
+            page.on("request", lambda r: posts.append(r) if r.method == "POST" else None)
 
             def later(script, delay=100):
                 page.evaluate(f"setTimeout(() => {{ {script} }}, {delay})")
@@ -451,24 +666,121 @@ class ApplyTests(unittest.TestCase):
             def press(button_id):
                 return f"document.getElementById('{button_id}').click();"
 
+            def in_panel(selector):
+                host = "document.getElementById('edurec-apply-panel')"
+                return f"{host}.shadowRoot.querySelector('{selector}')"
+
+            def panel_state():
+                root = "document.getElementById('edurec-apply-panel').shadowRoot"
+                return page.evaluate(f"""() => ({{
+                    viewed: {in_panel(".tab.active")}?.dataset.tab,
+                    selected: {in_panel(".pane.selected")}?.dataset.tab,
+                    pill: {in_panel(".pill.active")}.textContent,
+                    modified: [...{root}.querySelectorAll('.pane')].filter(pane =>
+                        [...pane.querySelectorAll('.modified')].some(el =>
+                            !el.hidden && getComputedStyle(el).display !== 'none')
+                    ).map(pane => pane.dataset.tab),
+                    markers: Object.fromEntries([...{root}.querySelectorAll('.pane')].map(
+                        pane => [pane.dataset.tab, [...pane.querySelectorAll('.select')].map(
+                            el => [el.textContent, el.disabled])])),
+                    reason: {in_panel("#reason")}.value,
+                    scrollTop: {in_panel("#body")}.scrollTop,
+                    outlined: Object.fromEntries('{",".join(BUTTONS)}'.split(',').map(
+                        id => [id, document.getElementById(id).style.outline])),
+                }})""")
+
+            def outlined():
+                state = panel_state()["outlined"]
+                return {id for id, outline in state.items() if outline}
+
+            def set_box(value):
+                page.evaluate(
+                    f"""() => {{ const box = document.getElementById('{COMMENTS}');
+                    box.value = {value!r}; box.dispatchEvent(new Event('input')); }}"""
+                )
+
             entered = site.prepare(advice, panel, dry_run=False)
-            self.assertEqual(entered, advice.comment + "\n\nprior", "new comment on top")
-            self.assertEqual(page.locator(f'[id="{COMMENTS}"]').input_value(), entered)
+            self.assertEqual(entered, {"recommended": recommended, "fallback": fallback})
+            self.assertEqual(recommended, advice.comment + "\n\nprior", "new comment on top")
+            self.assertEqual(box.input_value(), recommended)
             self.assertEqual(page.evaluate("window.changes"), 1, "change event dispatched")
             self.assertEqual(page.locator("#edurec-apply-panel").count(), 1)
-            self.assertIn("outline", page.locator(f"#{approve}").get_attribute("style") or "")
-            later(press("edurec-apply-skip"))
-            self.assertEqual(site.await_action(), Skipped())
-            self.assertEqual(page.locator(f'[id="{COMMENTS}"]').input_value(), "prior")
+            self.assertTrue(
+                page.evaluate("!!document.getElementById('edurec-apply-panel').shadowRoot")
+            )
+            self.assertEqual(
+                page.evaluate(f"getComputedStyle({in_panel('#skip')}).color"),
+                "rgb(0, 0, 0)",
+                "page CSS does not leak into the panel",
+            )
+            self.assertEqual(outlined(), {approve})
+            self.assertIn("rgb(46, 125, 50)", panel_state()["outlined"][approve])
+            self.assertEqual(
+                (panel_state()["viewed"], panel_state()["selected"]), ("recommended", "recommended")
+            )
+            self.assertEqual(panel_state()["pill"], "Approve")
+            self.assertEqual(panel_state()["modified"], [])
+            markers = {"recommended": [["Selected", True]], "fallback": [["Select", False]]}
+            self.assertEqual(panel_state()["markers"], markers)
 
-            site.prepare(advice, panel, dry_run=True)
-            self.assertTrue(all(page.locator(f"#{b}").is_disabled() for b in BUTTONS))
-            self.assertFalse(page.locator(f"#{CANCEL}").is_disabled())
-            later(press("edurec-apply-skip"))
-            self.assertEqual(site.await_action(), Skipped())
+            # The modified indicator follows the box, in the selected pane only; Reset
+            # from either pane restores the selected prefill.
+            set_box("typed")
+            self.assertEqual(panel_state()["modified"], ["recommended"])
+            page.evaluate(f"{in_panel('.pane[data-tab=fallback] .reset')}.click()")
+            self.assertEqual(box.input_value(), recommended)
+            self.assertEqual(panel_state()["modified"], [])
 
-            # A PeopleSoft re-render replaces the form (same ids), drops the panel, the hook
-            # and the disabled state, and bumps ICStateNum; the box keeps the reviewer's text.
+            # Clicking a tab only previews it: box, outline, pill and markers stay put.
+            page.evaluate(f"{in_panel('.tab[data-tab=fallback]')}.click()")
+            self.assertEqual(messages, [])
+            self.assertEqual(
+                (panel_state()["viewed"], panel_state()["selected"]), ("fallback", "recommended")
+            )
+            self.assertEqual(box.input_value(), recommended)
+            self.assertEqual(panel_state()["pill"], "Approve")
+            self.assertEqual(outlined(), {approve})
+            self.assertEqual(panel_state()["markers"], markers)
+
+            # Select swaps the comment, re-targets the outline, pill and markers.
+            page.evaluate(f"{in_panel('.pane[data-tab=fallback] .select')}.click()")
+            self.assertEqual(messages, [])
+            self.assertEqual(box.input_value(), fallback)
+            self.assertEqual(panel_state()["selected"], "fallback")
+            self.assertEqual(panel_state()["pill"], "Request Remapping", "pill follows selection")
+            self.assertEqual(outlined(), {remap})
+            self.assertIn("rgb(239, 108, 0)", panel_state()["outlined"][remap])
+            self.assertEqual(
+                panel_state()["markers"],
+                {"recommended": [["Select", False]], "fallback": [["Selected", True]]},
+            )
+            self.assertEqual(panel_state()["modified"], [])
+
+            # Selecting over an edited box asks first; a dismissed confirm changes nothing.
+            set_box("typed")
+            self.assertEqual(panel_state()["modified"], ["fallback"])
+            page.evaluate(f"{in_panel('.tab[data-tab=recommended]')}.click()")
+            page.evaluate(f"{in_panel('.pane[data-tab=recommended] .select')}.click()")
+            self.assertEqual(
+                messages,
+                [
+                    "The comment box differs from the Fallback comment. "
+                    "Replace it with the Recommended comment?"
+                ],
+            )
+            self.assertEqual(box.input_value(), "typed")
+            self.assertEqual(panel_state()["selected"], "fallback")
+            self.assertEqual(outlined(), {remap})
+            answers.append(True)
+            page.evaluate(f"{in_panel('.pane[data-tab=recommended] .select')}.click()")
+            self.assertEqual(box.input_value(), recommended)
+            self.assertEqual(panel_state()["selected"], "recommended")
+            self.assertEqual(panel_state()["pill"], "Approve")
+            self.assertEqual(outlined(), {approve})
+            self.assertEqual(panel_state()["markers"], markers)
+            messages.clear()
+
+            # Selected tab, viewed tab, scroll position and skip reason survive a re-render.
             rerender = f"""
                 const form = document.getElementById('N_EXSP_MOD_APPR');
                 const value = document.getElementById('{COMMENTS}').value;
@@ -477,6 +789,47 @@ class ApplyTests(unittest.TestCase):
                 form.innerHTML = form.innerHTML;
                 document.getElementById('{COMMENTS}').value = value;
                 document.getElementById('ICStateNum').value = state + 'r';"""
+            page.evaluate(f"{in_panel('.pane[data-tab=fallback] .select')}.click()")
+            page.evaluate(f"{in_panel('.tab[data-tab=recommended]')}.click()")
+            page.evaluate(f"{in_panel('#body')}.scrollTop = 150")
+            page.evaluate(f"{in_panel('#body')}.dispatchEvent(new Event('scroll'))")
+            page.evaluate(
+                f"""() => {{ const reason = {in_panel("#reason")};
+                reason.value = 'later'; reason.dispatchEvent(new Event('input')); }}"""
+            )
+            self.assertEqual(panel_state()["scrollTop"], 150, "the body scrolls")
+            later(f"document.getElementById('{COMMENTS}').value = 'kept'; " + rerender)
+            later(f"window.restored = ({in_panel('#skip')} ? 1 : 0)", 300)
+            later(f"{in_panel('#skip')}.click()", 500)
+            self.assertEqual(site.await_action(), Skipped("later"))
+            self.assertEqual(page.evaluate("window.restored"), 1)
+            state = panel_state()
+            self.assertEqual(
+                (state["selected"], state["viewed"], state["reason"], state["scrollTop"]),
+                ("fallback", "recommended", "later", 150),
+            )
+            self.assertEqual(state["pill"], "Request Remapping")
+            self.assertEqual(
+                state["markers"],
+                {"recommended": [["Select", False]], "fallback": [["Selected", True]]},
+                "the buttons follow the restored selection",
+            )
+            self.assertEqual(outlined(), {remap})
+            self.assertEqual(box.input_value(), "prior", "Skip restores the prior comment")
+
+            # A fresh prepare starts from the recommended tab with an empty reason.
+            site.prepare(advice, panel, dry_run=True)
+            state = panel_state()
+            self.assertEqual(
+                (state["selected"], state["viewed"], state["reason"], state["scrollTop"]),
+                ("recommended", "recommended", "", 0),
+            )
+            self.assertTrue(all(page.locator(f"#{b}").is_disabled() for b in BUTTONS))
+            self.assertFalse(page.locator(f"#{CANCEL}").is_disabled())
+            later(f"{in_panel('#skip')}.click()")
+            self.assertEqual(site.await_action(), Skipped())
+
+            # A re-render also restores the dry-run state; the box keeps the reviewer's text.
             site.prepare(advice, panel, dry_run=True)
             later(f"document.getElementById('{COMMENTS}').value = 'kept'; " + rerender)
             later(
@@ -487,7 +840,7 @@ class ApplyTests(unittest.TestCase):
                     value: document.getElementById('{COMMENTS}').value}};""",
                 300,
             )
-            later(press("edurec-apply-skip"), 500)
+            later(f"{in_panel('#skip')}.click()", 500)
             self.assertEqual(site.await_action(), Skipped())
             self.assertEqual(
                 page.evaluate("window.restored"),
@@ -499,19 +852,10 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(site.await_action(), Left())
             page.evaluate(f"document.body.insertAdjacentHTML('beforeend', '{fields}')")
 
-            messages = []
-            posts = []
-
-            def dismiss(dialog):
-                messages.append(dialog.message)
-                dialog.dismiss()
-
-            page.on("dialog", dismiss)
-            page.on("request", lambda r: posts.append(r) if r.method == "POST" else None)
             site.prepare(advice, panel, dry_run=True)
             # A stale page may have lost `disabled` but keep the hook: the click is still blocked.
             later(f"document.getElementById('{approve}').disabled = false; " + press(approve))
-            later(press("edurec-apply-skip"), 300)
+            later(f"{in_panel('#skip')}.click()", 300)
             self.assertEqual(site.await_action(), Skipped())
             self.assertEqual(messages, ["Dry run: nothing is submitted"])
             self.assertEqual(posts, [])
@@ -519,19 +863,65 @@ class ApplyTests(unittest.TestCase):
             messages.clear()
             site.prepare(advice, panel, dry_run=False)
             later(press(reject))
-            later(press("edurec-apply-skip"), 300)
+            later(f"{in_panel('#skip')}.click()", 300)
             self.assertEqual(site.await_action(), Skipped(), "A dismissed confirm aborts the click")
-            self.assertEqual(messages, ["Recommended: approve. Submit Reject anyway?"])
+            self.assertEqual(messages, ["Recommended: Approve. Submit Reject anyway?"])
             self.assertEqual(posts, [])
+
+            # The fallback's button offers to switch comments: no keeps the box and blocks.
+            messages.clear()
+            site.prepare(advice, panel, dry_run=False)
+            later(press(remap))
+            later(f"{in_panel('#skip')}.click()", 300)
+            self.assertEqual(site.await_action(), Skipped())
+            self.assertEqual(
+                messages, ["This matches the fallback. Switch to the fallback comment and submit?"]
+            )
+            self.assertEqual(posts, [])
+
+            # Yes selects the fallback, swaps in its comment, and the click goes through.
+            messages.clear()
+            set_box("prior")
+            site.prepare(advice, panel, dry_run=False)
+            answers.append(True)
+            later(press(remap))
+            self.assertEqual(site.await_action(), Clicked(remap, fallback, "fallback"))
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(box.input_value(), fallback)
+            self.assertEqual(panel_state()["selected"], "fallback")
+            self.assertEqual(panel_state()["pill"], "Request Remapping")
+
+            # With the fallback selected its own button needs no confirm; the other one does.
+            messages.clear()
+            site.prepare(advice, panel, dry_run=False)
+            page.evaluate(f"{in_panel('.pane[data-tab=fallback] .select')}.click()")
+            later(press(approve))
+            later(f"{in_panel('#skip')}.click()", 300)
+            self.assertEqual(site.await_action(), Skipped())
+            self.assertEqual(
+                messages, ["Fallback selected: Request Remapping. Submit Approve anyway?"]
+            )
+
+            # Merely viewing the fallback changes nothing: the selected tab is what counts.
+            messages.clear()
+            set_box("prior")
+            site.prepare(advice, panel, dry_run=False)
+            page.evaluate(f"{in_panel('.tab[data-tab=fallback]')}.click()")
+            later(press(approve))
+            self.assertEqual(site.await_action(), Clicked(approve, recommended, "recommended"))
+            self.assertEqual(messages, [])
 
             site.prepare(advice, panel, dry_run=False)
             later(f"document.getElementById('{COMMENTS}').value = 'edited'; " + press(approve))
-            self.assertEqual(site.await_action(), Clicked(approve, "edited"))
+            self.assertEqual(site.await_action(), Clicked(approve, "edited", "recommended"))
 
             site.prepare(advice, panel, dry_run=False)
             later(press(CANCEL))
             # The mock page never navigates, so the box still holds the edited text.
-            self.assertEqual(site.await_action(), Clicked("#ICList", advice.comment + "\n\nedited"))
+            self.assertEqual(
+                site.await_action(),
+                Clicked("#ICList", advice.comment + "\n\nedited", "recommended"),
+            )
             browser.close()
 
     def test_apply_arguments(self):
@@ -561,10 +951,10 @@ class PrefillTests(unittest.TestCase):
     def test_panel_shows_the_existing_comment(self):
         _, request = records()[0]
         item = Item(decision(request), request)
-        html = panel_html(item, 1, 1, [], False, existing="kept <below>")
-        self.assertIn("Existing comment", html)
+        html = panel_html(item, Progress(1, 1, 0, 1), [], False, existing="kept <below>")
+        self.assertIn("Previous comments", html)
         self.assertIn("kept &lt;below&gt;", html)
-        self.assertNotIn("Existing comment", panel_html(item, 1, 1, [], False))
+        self.assertNotIn("Previous comments", panel_html(item, Progress(1, 1, 0, 1), [], False))
 
 
 def test_forget_downloads_clears_history_tables(tmp_path):

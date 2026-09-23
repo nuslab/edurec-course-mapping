@@ -29,11 +29,20 @@ Completeness = Literal["single_mapping", "unverified"]
 Verdict = Literal["approve", "reject", "request remapping", "request for more information"]
 Confidence = Literal["high", "medium", "low"]
 Action = Literal[Verdict, "skip"]
+Tab = Literal["recommended", "fallback"]
+"""The panel's comment tabs; the fallback exists only when the decision names one."""
+CommentSource = Literal[Tab, "edited"]
 
 MANY_TO_ONE = "Many to One"
 PENDING = "Pending Approval"
 NOT_IN_QUEUE = "not in approval queue"
 """`Applied.status_after` when a submission removed the request from the approval queue."""
+
+
+def display(value: str) -> str:
+    """The panel's form of a verdict or confidence: "request remapping" -> "Request Remapping"."""
+    return value.title()
+
 
 LIST_COLUMNS = (
     "user_id",
@@ -418,11 +427,23 @@ class Decision:
     def prefill(self, existing: str | None) -> str:
         """The comment box content: EduRec replaces the field, so the decision's
         comment goes on top and any existing text is kept below it."""
-        below = (existing or "").strip()
-        return f"{self.comment.strip()}\n\n{below}" if below else self.comment.strip()
+        return stack(self.comment, existing)
+
+    def prefills(self, existing: str | None) -> dict[Tab, str]:
+        """The comment box content per panel tab; the fallback only when there is one."""
+        result: dict[Tab, str] = {"recommended": self.prefill(existing)}
+        if self.fallback_verdict:
+            result["fallback"] = stack(self.fallback_comment or "", existing)
+        return result
 
     def to_dict(self) -> dict[str, object]:
         return as_dict(self)
+
+
+def stack(comment: str, existing: str | None) -> str:
+    """`comment` on top of any `existing` text, separated by a blank line."""
+    below = (existing or "").strip()
+    return f"{comment.strip()}\n\n{below}" if below else comment.strip()
 
 
 @dataclass
@@ -439,12 +460,15 @@ class Applied:
     action: Action
     comment_submitted: str | None
     comment_edited: bool
-    """True when the submitted comment differs from the decision's comment."""
+    """True when the submitted comment differs from the pre-filled comment of the active tab."""
     status_before: str | None
     status_after: str | None
     applied_at: str
     dry_run: bool
     reason: str | None = None
+    comment_source: CommentSource | None = None
+    """Which pre-filled comment was submitted, or `edited` when the box differed from it;
+    None for skips."""
 
     def to_dict(self) -> dict[str, object]:
         return as_dict(self)
@@ -459,10 +483,15 @@ class Clicked(NamedTuple):
     action: str
     """A `browser.BUTTONS` id, or `#ICList` when Cancel returned to the list."""
     comment: str | None
+    source: Tab | None = None
+    """The panel tab selected at the click, when the hook reported it."""
 
 
 class Skipped(NamedTuple):
     """The panel's Skip was pressed; the comment box is restored."""
+
+    reason: str = ""
+    """What the reviewer typed into the panel's skip reason field."""
 
 
 class Left(NamedTuple):

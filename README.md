@@ -167,25 +167,56 @@ For each queued request the program searches EduRec by the request's identity,
 opens the detail, checks that it is still `Pending Approval` and still shows
 the exported courses, mapping number and sequence, pre-fills the comment box
 with the decision's comment on top of any existing comment (EduRec replaces
-the field, so the earlier text is kept below it), and injects a panel on the right with the
-recommended verdict (its EduRec button gets a green outline), overlap,
-confidence, topic lists, concerns, remapping analysis, sibling parts of a
-many-to-one mapping with their logged outcome, and the queue position. You then
-edit the comment if you wish and press one of EduRec's own buttons, or the
-panel's **Skip**. Choosing a button other than the recommended one asks for
-confirmation; Cancel counts as a skip. The program never presses an action
-button. After your click it waits for the postback, re-reads the status and
-moves on. A request that no longer appears in the approval queue (Request
-Remapping and Request More Information remove it) is logged with status
-`not in approval queue` and counts as verified; if the status is still
-`Pending Approval` the session stops rather than guessing. A comment that is
-empty or still contains `[` or `XXXX` is skipped without being entered.
+the field, so the earlier text is kept below it), and injects a panel on the
+right. The panel is rendered in a shadow root so EduRec's styles cannot leak
+into it. From top to bottom it shows:
+
+- a header with two coloured badges: the selected verdict (green for approve,
+  red for reject, amber for the two requests; the matching EduRec button gets
+  an outline in the same colour) and the overlap percentage (green from 70%,
+  amber from 40%, red below); under them the course, a thin progress bar and
+  the caption `<position> of <total> this session · <applied> of <requests>
+  overall`;
+- two tabs, **Recommended** and **Fallback**, each a bordered card. Clicking a
+  tab only previews its pane. A selectable pane opens with **Decision:**
+  and the verdict (the Recommended pane adds the confidence badge: green high,
+  amber medium, red low), then the fallback's rationale where it applies, the
+  comment text and a tools line with **Reset comment**, which re-fills the box
+  with the selected tab's text (on top of the earlier comment), and a
+  **Select** button that reads **Selected** and is disabled on the selected
+  tab (Recommended at first); a "modified" marker appears on the selected
+  pane while the box differs from its text. Without a fallback verdict the
+  Fallback pane reads "No fallback" with the advisor's reason and cannot be
+  selected. Pressing Select puts that tab's text in the box, moves the
+  button outline to its verdict and updates the header pill, which follows
+  the selection, not the tab being viewed; if you had edited the box it asks
+  first;
+- previous comments already on the request;
+- the remap section (**Target:** and the analysis), when the advisor proposed one;
+- concerns, when there are any;
+- overlap, missing and extra topics as three lists, then every sibling part of
+  a many-to-one mapping by its course with its logged outcome, flagged when it
+  was submitted with a different action;
+- pinned at the bottom, a **Skip** button with an optional reason field.
+
+You then edit the comment if you wish and press one of EduRec's own buttons,
+or the panel's Skip. Pressing a button other than the selected tab's verdict
+asks for confirmation; if the button matches the fallback while Recommended
+is selected, the question offers to select the fallback and submit its comment.
+Cancel counts as a skip. The program never presses an action button. After
+your click it waits for the postback, re-reads the status and moves on. A
+request that no longer appears in the approval queue (Request Remapping and
+Request More Information remove it) is logged with status `not in approval
+queue` and counts as verified; if the status is still `Pending Approval` the
+session stops rather than guessing. A comment that is empty or still contains
+`[` or `XXXX` is skipped without being entered.
 
 PeopleSoft re-renders the page on many harmless interactions (collapsing a
 section, sorting a grid, tabbing out of a changed field), which removes the
 panel and the click hook. The program notices, re-installs them with the
-comment box left as you had it, and keeps waiting; the dry-run buttons are
-disabled again too. If the detail page goes away without a recognised button
+comment box left as you had it, the same selected and viewed tabs, scroll
+position and skip reason,
+and keeps waiting; the dry-run buttons are disabled again too. If the detail page goes away without a recognised button
 (you navigated elsewhere), the request is logged as a skip with reason
 "reviewer left the page". A request that already left the queue before it was
 opened is logged as a skip and the session continues.
@@ -197,9 +228,12 @@ program has stopped.
 
 Every outcome is appended to `decisions/applied.yaml` before the next request
 opens: request id, recommended verdict, the action taken (a verdict or
-`skip`), the comment as submitted and whether it was edited, status before and
+`skip`), the comment as submitted, which text it was (`comment_source` is
+`recommended`, `fallback`, or `edited` when the box differed from the selected
+tab's text; `comment_edited` says the same as a flag), status before and
 after, timestamp, dry-run flag and a reason for skips or unverified
-submissions. Requests logged with a verdict are never offered again, including
+submissions. A skip reason typed into the panel is logged as
+`skipped by the reviewer: <reason>`. Requests logged with a verdict are never offered again, including
 unverified ones; skipped requests are offered on the next session. Parts of a
 many-to-one mapping are queued consecutively and the panel warns when a
 sibling was already submitted with a different action.

@@ -168,6 +168,29 @@ class ExtractTests(unittest.TestCase):
             self.assertEqual(site.control("STRM$to").input_value(), "2619")
             browser.close()
 
+    def test_leaving_between_operator_waits_for_form_rebuild(self):
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_content("""<form name="win0" id="N_EXSP_MOD_APPR">
+                <select id="N_EXSP_MOD_VW2_EMPLID$op">
+                  <option value="2">=</option><option value="5">&gt;=</option>
+                  <option value="9" selected>between</option>
+                </select>
+                <input id="N_EXSP_MOD_VW2_EMPLID"><input id="N_EXSP_MOD_VW2_EMPLID$to">
+                </form>""")
+            site = EduRec(context)
+            transitions = []
+            site.transition = lambda action, trigger=None, target=None: (
+                transitions.append((action, target)),
+                trigger(),
+            )
+            site.criterion("EMPLID", "A0000500X", None)
+            self.assertEqual(transitions, [("N_EXSP_MOD_VW2_EMPLID$op", None)])
+            self.assertEqual(site.control("EMPLID").input_value(), "A0000500X")
+            browser.close()
+
     def test_search_switches_grid_to_view_100(self):
         listing = fixture("main.html")
         listing.find("a", id="PTS_CFG_CL_STD_RSL$hviewall$0").string = "View 100"

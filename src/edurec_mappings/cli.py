@@ -215,7 +215,7 @@ def forget_downloads(profile: Path) -> None:
             connection.execute(f"DELETE FROM {table}")
 
 
-def fit_to_screen(context: BrowserContext, y_offset: int = 40) -> None:
+def fit_to_screen(context: BrowserContext, y_offset: int = 0) -> None:
     """Size the window to the display; the VNC window manager ignores --start-maximized."""
     page = context.pages[0] if context.pages else context.new_page()
     screen = page.evaluate("() => ({width: screen.availWidth, height: screen.availHeight})")
