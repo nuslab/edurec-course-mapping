@@ -12,7 +12,8 @@ from playwright.sync_api import Error as PlaywrightError
 from edurec_mappings import cli
 from edurec_mappings.browser import COMPONENT, ApprovalNotLoadedError
 from edurec_mappings.export import restore_list
-from edurec_mappings.models import Listing, ListRow
+from edurec_mappings.models import Export, LinkedDocument, Listing, ListRow, Request
+from tests.test_export import records
 
 NOT_LOADED = ApprovalNotLoadedError(
     "Course Mapping Approval is not loaded. Open the approval component."
@@ -32,10 +33,7 @@ def namespace(**overrides: object) -> argparse.Namespace:
         "rows": None,
         "terms": ["2620"],
         "scrape_urls": False,
-        "anonymize": False,
-        "anonymized_run": "run-anonymized",
-        "run": "run",
-        "decisions": "run-anonymized/decisions",
+        "store": "store",
         "request_ids": [],
         "verdicts": [],
         "dry_run": False,
@@ -134,6 +132,10 @@ class ConnectTests(unittest.TestCase):
             cli.connect(self.context, namespace(ready=True))
 
 
+def collected(count: int = 2) -> list[Request]:
+    return [request for _, request in records()[:count]]
+
+
 class RunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.mocks: dict[str, mock.MagicMock] = {}
@@ -144,10 +146,7 @@ class RunTests(unittest.TestCase):
             "playwright_fetcher",
             "playwright_renderer",
             "scrape",
-            "checkpoint",
-            "reset",
-            "save",
-            "anonymize",
+            "Store",
             "Reviewer",
             "review",
             "hold_open",
@@ -155,45 +154,65 @@ class RunTests(unittest.TestCase):
             patcher = mock.patch.object(cli, name)
             self.mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
-        result = self.mocks["export"].return_value
-        result.status, result.requests = "complete", [1, 2]
+
+        def export(site: object, data: Export, **_: object) -> None:
+            data.requests.extend(collected())
+            data.status = "complete"
+
+        self.mocks["export"].side_effect = export
+        self.save = self.mocks["Store"].return_value.save
+        self.save.return_value = ["new"]
         self.context = mock.MagicMock()
 
     def assert_dialog_hook_removed(self) -> None:
         self.context.on.assert_called_once_with("dialog", cli.manual_dialog)
         self.context.remove_listener.assert_called_with("dialog", cli.manual_dialog)
 
-    def test_run_export_extracts_with_the_parsed_filters(self) -> None:
+    def test_run_export_extracts_with_the_parsed_filters_and_stores(self) -> None:
         out = quietly(cli.run_export, self.context, namespace())
         self.mocks["EduRec"].assert_called_once_with(self.context, 60000)
         self.mocks["export"].assert_called_once_with(
             self.mocks["EduRec"].return_value,
-            "run",
+            mock.ANY,
             reassign_id="",
             rows=None,
             terms=["2620"],
         )
-        self.assertIn("complete: 2 requests → run", out)
+        self.assertIn("complete: 2 requests collected", out)
+        self.assertIn("2 requests stored, 1 new versions → store", out)
+        self.mocks["Store"].assert_called_once_with("store")
+        self.assertEqual(self.save.call_args.args[0], collected())
         self.mocks["scrape"].assert_not_called()
-        self.mocks["save"].assert_not_called()
         self.assert_dialog_hook_removed()
 
-    def test_run_scrapes_and_anonymizes_when_asked(self) -> None:
-        quietly(cli.run_export, self.context, namespace(scrape_urls=True, anonymize=True))
-        self.mocks["scrape"].assert_called_once()
-        self.mocks["reset"].assert_called_once_with("run-anonymized")
-        self.mocks["save"].assert_called_once_with(
-            self.mocks["anonymize"].return_value, "run-anonymized"
-        )
+    def test_run_scrapes_before_storing_when_asked(self) -> None:
+        def scrape(requests: list[Request], *_: object) -> None:
+            for request in requests:
+                request.linked_documents = [LinkedDocument("https://example.org")]
 
-    def test_run_holds_the_browser_open_on_error(self) -> None:
-        self.mocks["export"].side_effect = RuntimeError("lost session")
-        with self.assertRaises(RuntimeError):
+        self.mocks["scrape"].side_effect = scrape
+        quietly(cli.run_export, self.context, namespace(scrape_urls=True))
+        (stored,) = self.save.call_args.args
+        self.assertEqual(len(stored), 2)
+        self.assertTrue(all(r.linked_documents for r in stored))
+
+    def test_an_interrupted_export_stores_what_was_complete(self) -> None:
+        def export(site: object, data: Export, **_: object) -> None:
+            data.requests.extend(collected(1))
+            raise RuntimeError("lost session")
+
+        self.mocks["export"].side_effect = export
+        with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
             cli.run_export(self.context, namespace())
+        self.assertEqual(len(self.save.call_args.args[0]), 1)
         self.mocks["hold_open"].assert_called_once_with(
-            mock.ANY, "Collection stopped: lost session. Checkpoint retained."
+            mock.ANY, "Collection stopped: lost session."
         )
         self.assert_dialog_hook_removed()
+        # With --scrape-urls a request is only complete once its documents are known.
+        with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
+            cli.run_export(self.context, namespace(scrape_urls=True))
+        self.assertEqual(self.save.call_args.args[0], [])
 
     def test_run_review_passes_the_filters_and_reports_errors(self) -> None:
         args = namespace(request_ids=["r1"], verdicts=["approve"], dry_run=True)
@@ -201,8 +220,7 @@ class RunTests(unittest.TestCase):
         self.mocks["Reviewer"].assert_called_once_with(self.context, 60000)
         self.mocks["review"].assert_called_once_with(
             self.mocks["Reviewer"].return_value,
-            "run",
-            "run-anonymized/decisions",
+            "store",
             request_ids=["r1"],
             verdicts=["approve"],
             dry_run=True,
@@ -210,14 +228,21 @@ class RunTests(unittest.TestCase):
         self.mocks["review"].side_effect = RuntimeError("boom")
         with redirect_stdout(io.StringIO()) as out, self.assertRaises(RuntimeError):
             cli.run_review(self.context, args)
-        self.assertIn("Review stopped: boom. Log retained.", out.getvalue())
+        self.assertIn("Review stopped: boom. Stored outcomes retained.", out.getvalue())
         self.mocks["hold_open"].assert_not_called()
 
 
 class ParseArgsTests(unittest.TestCase):
     def test_explicit_term_is_left_to_extract_and_blank_reads_the_configuration(self) -> None:
-        self.assertEqual(cli.parse_args(["export", "--term", "2610"]).terms, ["2610"])
-        self.assertTrue(cli.parse_args(["export"]).terms)
+        self.assertEqual(
+            cli.parse_args(["export", "--store", "s", "--term", "2610"]).terms, ["2610"]
+        )
+        self.assertTrue(cli.parse_args(["export", "--store", "s"]).terms)
+
+    def test_pending_takes_only_the_store(self) -> None:
+        self.assertEqual(cli.parse_args(["pending", "--store", "s"]).store, "s")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.parse_args(["pending", "--store", "s", "--dry-run"])
 
     def test_a_command_is_required(self) -> None:
         for argv in ([], ["--term", "2610"]):

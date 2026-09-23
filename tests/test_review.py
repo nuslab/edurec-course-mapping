@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, TypedDict
 import yaml
 from playwright.sync_api import Dialog, sync_playwright
 
-from edurec_mappings.anonymize import anonymize
 from edurec_mappings.browser import (
     BUTTONS,
     CANCEL,
@@ -29,35 +28,32 @@ from edurec_mappings.models import (
     PENDING,
     Clicked,
     Confidence,
-    Decision,
-    Identity,
     Outcome,
+    Proposal,
+    Reaction,
     Request,
-    Reviewed,
     Skipped,
     Verdict,
     hydrate,
     plain,
 )
-from edurec_mappings.parse import DETAIL, digest
+from edurec_mappings.parse import DETAIL
 from edurec_mappings.review import (
     OVERLAP_FAIR,
     OVERLAP_GOOD,
-    REVIEWED,
     UNVERIFIED,
-    VANISHED,
     Item,
     Progress,
+    action_of,
     comment_problem,
     load_queue,
-    load_reviewed,
     overlap_colour,
     panel_html,
     review,
     select,
     stale_reason,
 )
-from edurec_mappings.store import document, dump, save
+from edurec_mappings.store import OUTCOMES, PROPOSALS, Store, Version, dump, load
 from tests.test_export import records
 
 if TYPE_CHECKING:
@@ -66,11 +62,10 @@ if TYPE_CHECKING:
 STARTED = "2026-09-22T10:00:00+00:00"
 
 
-class DecisionFields(TypedDict, total=False):
-    source_started_at: str
+class ProposalFields(TypedDict, total=False):
     comment: str
     overlap_percentage: int
-    decision_confidence: Confidence
+    confidence: Confidence
     overlap: list[str]
     missing_from_pu: list[str]
     extra_in_pu: list[str]
@@ -121,16 +116,14 @@ def ordered(html: str, *needles: str) -> None:
         position = found
 
 
-def decision(
-    request: Request, verdict: Verdict = "approve", **overrides: Unpack[DecisionFields]
-) -> Decision:
-    values = Decision(
-        source_started_at=STARTED,
-        request_id=request.request_id,
+def proposal(
+    request: Request, verdict: Verdict = "approve", **overrides: Unpack[ProposalFields]
+) -> Proposal:
+    values = Proposal(
         verdict=verdict,
         comment="Approved: the syllabus covers search & <planning>.",
         overlap_percentage=85,
-        decision_confidence="high",
+        confidence="high",
         overlap=["Search"],
         missing_from_pu=["Planning"],
         concerns=["Weight of exam < 50%"],
@@ -138,45 +131,62 @@ def decision(
     return replace(values, **overrides)
 
 
-def make_run(directory: str, count: int = 4) -> tuple[Path, Path, list[Request]]:
-    """An export of `count` requests, its anonymized copy and a decision for each."""
-    run, anon = Path(directory) / "run", Path(directory) / "run-anonymized"
+def make_store(directory: str, count: int = 4) -> tuple[Store, list[Version]]:
+    """A store of `count` requests with a proposal on each."""
     requests = [copy.deepcopy(r) for _, r in records()[:count]]
     if count > 1:  # The first two become parts of one many-to-one mapping.
         requests[1].identity = replace(requests[0].identity, sequence="2")
-        requests[1].request_id = digest(plain(requests[1].identity))
         requests[0].mapping_type = requests[1].mapping_type = "Many to One"
-    data = document()
-    data.started_at = STARTED
-    data.requests = requests
-    save(data, run)
-    save(anonymize(data), anon)
-    for request in requests:
-        path = anon / "decisions" / f"{request.request_id}.yaml"
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(dump(plain(decision(request))))
-    return run, anon / "decisions", requests
+    store = Store(Path(directory) / "store")
+    versions = store.save(requests)
+    for version in versions:
+        write_proposal(store, version, proposal(version.request))
+    return store, versions
+
+
+def write_proposal(store: Store, version: Version, advice: Proposal | dict[str, object]) -> Path:
+    path = store.root / version.path(PROPOSALS)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dump(advice if isinstance(advice, dict) else plain(advice)))
+    return path
+
+
+def stored_outcomes(store: Store) -> dict[str, Outcome]:
+    return {
+        path.parent.name: hydrate(Outcome, load(path))
+        for path in (store.root / OUTCOMES).glob("*/*.yaml")
+    }
+
+
+def queue_of(store: Store) -> list[Item]:
+    return load_queue(store, store.latest())
+
+
+def ids_of(versions: list[Version]) -> list[str]:
+    return [version.request_id for version in versions]
 
 
 class FakeSite:
-    """Scripted reviewer: `outcomes` maps request_id to what the human does."""
+    """Scripted reviewer: `reactions` maps request_id to what the human does."""
 
     def __init__(
         self,
-        outcomes: Mapping[str, Outcome | Callable[[], Outcome]],
+        reactions: Mapping[str, Reaction | Callable[[], Reaction]],
         live: Mapping[str, Request | Exception] | None = None,
         status_after: str | Exception = "Approved",
     ) -> None:
-        self.outcomes = outcomes
+        self.reactions = reactions
         self.live = live or {}
         self.status_after = status_after
         """A string, or an exception to raise from `status`."""
         self.opened: list[str] = []
+        self.students: list[str] = []
         self.prepared: list[tuple[str, str, bool]] = []
         self.current = ""
 
     def open(self, request: Request) -> Request:
         self.opened.append(request.request_id)
+        self.students.append(request.identity.student_id)
         live = self.live.get(request.request_id, request)
         if isinstance(live, Exception):
             raise live
@@ -185,12 +195,12 @@ class FakeSite:
         self.current = live.request_id
         return live
 
-    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> None:
-        self.prepared.append((decision.request_id, panel, dry_run))
+    def prepare(self, proposal: Proposal, panel: str, dry_run: bool) -> None:
+        self.prepared.append((self.current, panel, dry_run))
 
-    def await_action(self) -> Outcome:
-        outcome = self.outcomes[self.current]
-        return outcome() if callable(outcome) else outcome
+    def await_action(self) -> Reaction:
+        reaction = self.reactions[self.current]
+        return reaction() if callable(reaction) else reaction
 
     def status(self, request: Request) -> str:
         if isinstance(self.status_after, Exception):
@@ -203,173 +213,76 @@ class ReviewTests(unittest.TestCase):
         _, request = records()[0]
         loaded = hydrate(Request, yaml.safe_load(dump(plain(request))))
         self.assertEqual(loaded, request)
-        self.assertEqual(hydrate(Decision, plain(decision(request))), decision(request))
+        self.assertEqual(hydrate(Proposal, plain(proposal(request))), proposal(request))
         with self.assertRaises(ValueError):
-            hydrate(Decision, ["not", "a", "record"])
+            hydrate(Proposal, ["not", "a", "record"])
 
-    def test_request_ids_are_stable(self) -> None:
-        identity = Identity(
-            student_id="A0000001X",
-            academic_career="Undergraduate",
-            partner_university="Technical University of Munich",
-            study_program="SEP",
-            term="2025/2026 Semester 1",
-            mapping_number="1",
-            sequence="2",
-        )
-        # Decision files name requests by this digest; a change orphans them all.
-        self.assertEqual(digest(plain(identity)), "de5da59c3dd5b0f985ad04da")
-
-    def test_malformed_decisions_are_refused(self) -> None:
+    def test_malformed_proposals_are_refused(self) -> None:
         _, request = records()[0]
-        valid = plain(decision(request))
+        valid = plain(proposal(request))
         for field, value in [
             ("verdict", "Approve"),
-            ("decision_confidence", "High"),
+            ("confidence", "High"),
             ("overlap_percentage", "80"),
             ("overlap_percentage", 80.5),
             ("concerns", "one concern"),
             ("fallback_verdit", "reject"),
             # An unquoted YAML timestamp loads as a datetime, which JSON cannot hold.
-            ("source_started_at", datetime(2026, 9, 22, tzinfo=timezone.utc)),
+            ("comment", datetime(2026, 9, 22, tzinfo=timezone.utc)),
         ]:
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
-                hydrate(Decision, {**valid, field: value})
+                hydrate(Proposal, {**valid, field: value})
 
-    def test_malformed_decision_file_is_named(self) -> None:
+    def test_malformed_proposal_file_is_named(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory)
-            path = decisions / f"{requests[0].request_id}.yaml"
-            path.write_text(dump({**plain(decision(requests[0])), "verdict": "Approve"}))
+            store, versions = make_store(directory)
+            advice = {**plain(proposal(versions[0].request)), "verdict": "Approve"}
+            path = write_proposal(store, versions[0], advice)
             with self.assertRaisesRegex(ValueError, path.name):
-                load_queue(run, decisions)
+                queue_of(store)
 
-    def test_decisions_from_another_export_or_unknown_request_are_skipped(self) -> None:
+    def test_queue_is_the_proposed_latest_versions_without_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory)
-            stale = decisions / f"{requests[0].request_id}.yaml"
-            stale.write_text(dump(plain(decision(requests[0], source_started_at="older"))))
-            orphan = copy.deepcopy(requests[1])
-            orphan.request_id = "0" * 24
-            (decisions / "000000000000000000000000.yaml").write_text(dump(plain(decision(orphan))))
-            queue, rejected = load_queue(run, decisions)
+            store, versions = make_store(directory)
+            ids = ids_of(versions)
+            (store.root / versions[3].path(PROPOSALS)).unlink()
+            outcome = store.root / versions[2].path(OUTCOMES)
+            outcome.parent.mkdir(parents=True)
+            outcome.write_text("{}")
+            queue = queue_of(store)
+            self.assertEqual([item.request.request_id for item in queue], ids[:2])
+            self.assertEqual([item.version for item in queue], [v.hash for v in versions[:2]])
+            real = [r.identity.student_id for _, r in records()[:2]]
+            self.assertEqual([item.request.identity.student_id for item in queue], real)
+            # A changed request is a new version: its old proposal no longer applies.
+            changed = copy.deepcopy(records()[0][1])
+            changed.identity = replace(changed.identity, sequence="2")
+            changed.comments = "resubmitted"
+            (new,) = store.save([changed])
+            self.assertEqual(new.request_id, ids[1])
+            self.assertEqual([item.request.request_id for item in queue_of(store)], ids[:1])
+            write_proposal(store, new, proposal(new.request))
             self.assertEqual(
-                [item.request.request_id for item in queue],
-                [r.request_id for r in requests[1:]],
+                [(i.request.request_id, i.version) for i in queue_of(store)],
+                [(ids[0], versions[0].hash), (ids[1], new.hash)],
             )
-            self.assertEqual(sorted(rejected), [orphan.request_id, requests[0].request_id])
-            self.assertIn("older", rejected[requests[0].request_id])
-            self.assertIn("no requests/", rejected[orphan.request_id])
-            self.assertEqual(queue[0].request.identity.student_id, requests[1].identity.student_id)
-
-    def test_mismatched_run_and_decisions_are_refused(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            run, decisions, _ = make_run(directory)
-            inventory = yaml.safe_load((run / "inventory.yaml").read_text())
-            inventory["started_at"] = "other"
-            (run / "inventory.yaml").write_text(dump(inventory))
-            with self.assertRaisesRegex(RuntimeError, "different export"):
-                load_queue(run, decisions)
 
     def test_queue_keeps_siblings_together_and_honours_filters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory)
-            path = decisions / f"{requests[1].request_id}.yaml"
-            path.write_text(dump(plain(decision(requests[1], verdict="reject"))))
-            queue, _ = load_queue(run, decisions)
+            store, versions = make_store(directory)
+            write_proposal(store, versions[1], proposal(versions[1].request, verdict="reject"))
+            queue = queue_of(store)
             ids = [item.request.request_id for item in queue]
-            sibling_positions = [
-                ids.index(requests[0].request_id),
-                ids.index(requests[1].request_id),
-            ]
-            self.assertEqual(abs(sibling_positions[0] - sibling_positions[1]), 1)
-            self.assertEqual(set(ids), {r.request_id for r in requests})
-            log = [
-                Reviewed(
-                    request_id=requests[2].request_id,
-                    verdict_recommended="approve",
-                    action="approve",
-                    comment_submitted="x",
-                    reviewed_at=STARTED,
-                ),
-                Reviewed(
-                    request_id=requests[3].request_id,
-                    verdict_recommended="approve",
-                    action="skip",
-                    comment_submitted=None,
-                    reviewed_at=STARTED,
-                    reason="reviewer skipped",
-                ),
-            ]
-            remaining = select(queue, log)
+            first, second = ids.index(versions[0].request_id), ids.index(versions[1].request_id)
+            self.assertEqual(abs(first - second), 1)
+            self.assertEqual(set(ids), set(ids_of(versions)))
             self.assertEqual(
-                {item.request.request_id for item in remaining},
-                {r.request_id for r in (requests[0], requests[1], requests[3])},
-                "Submitted requests are skipped; skipped ones are offered again",
+                [i.request.request_id for i in select(queue, verdicts=["reject"])],
+                [versions[1].request_id],
             )
             self.assertEqual(
-                [i.request.request_id for i in select(queue, [], verdicts=["reject"])],
-                [requests[1].request_id],
+                [i.request.request_id for i in select(queue, request_ids=[ids[2]])], [ids[2]]
             )
-            self.assertEqual(
-                [i.request.request_id for i in select(queue, [], request_ids=[ids[2]])], [ids[2]]
-            )
-
-    def test_entries_from_before_the_export_do_not_block_a_resubmission(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory)
-            queue, _ = load_queue(run, decisions)
-            earlier = "2000-01-01T00:00:00+00:00"
-            log = [
-                Reviewed(
-                    request_id=requests[0].request_id,
-                    verdict_recommended="request remapping",
-                    action="request remapping",
-                    comment_submitted="x",
-                    reviewed_at=earlier,
-                ),
-                Reviewed(
-                    request_id=requests[1].request_id,
-                    verdict_recommended="approve",
-                    action="skip",
-                    comment_submitted=None,
-                    reviewed_at=earlier,
-                    reason=VANISHED,
-                ),
-                Reviewed(
-                    request_id=requests[2].request_id,
-                    verdict_recommended="approve",
-                    action="approve",
-                    comment_submitted="x",
-                    reviewed_at=STARTED,
-                ),
-            ]
-            remaining = {item.request.request_id for item in select(queue, log, started=STARTED)}
-            self.assertEqual(
-                remaining,
-                {r.request_id for r in requests if r is not requests[2]},
-                "Entries older than the export are a previous round; only entries since count",
-            )
-            self.assertEqual(
-                {item.request.request_id for item in select(queue, log)},
-                {requests[3].request_id},
-                "Without an export start, every entry counts as before",
-            )
-
-    def test_reviewed_log_round_trip(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / REVIEWED
-            self.assertEqual(load_reviewed(path), [])
-            entry = Reviewed(
-                request_id="abc",
-                verdict_recommended="reject",
-                action="skip",
-                comment_submitted=None,
-                reviewed_at=STARTED,
-                reason="comment is empty",
-            )
-            path.write_text(dump([plain(entry)]))
-            self.assertEqual(load_reviewed(path), [entry])
 
     def test_freshness_comparison(self) -> None:
         _, exported = records()[0]
@@ -400,29 +313,27 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(BUTTONS["N_SR_EXT_STD_DW_REQUEST_BTN"], "request remapping")
         self.assertNotIn(CANCEL, BUTTONS)
 
-    def test_panel_html_shows_the_decision_in_order_and_escapes_content(self) -> None:
+    def test_panel_html_shows_the_proposal_in_order_and_escapes_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory)
-            queue, _ = load_queue(run, decisions)
-            item = next(i for i in queue if i.request.request_id == requests[0].request_id)
-            item.decision.remap_target = "CS5242"
-            item.decision.remap_analysis = "Better fit <b>"
-            item.decision.extra_in_pu = ["Robotics"]
+            store, versions = make_store(directory)
+            first = versions[0].request_id
+            item = next(i for i in queue_of(store) if i.request.request_id == first)
+            item.proposal.remap_target = "CS5242"
+            item.proposal.remap_analysis = "Better fit <b>"
+            item.proposal.extra_in_pu = ["Robotics"]
             for key, value in FALLBACK.items():
-                setattr(item.decision, key, value)
-            sibling = requests[1].request_id
-            log = [
-                Reviewed(
-                    request_id=sibling,
-                    verdict_recommended="approve",
+                setattr(item.proposal, key, value)
+            sibling = versions[1].request_id
+            outcomes = {
+                sibling: Outcome(
                     action="reject",
-                    comment_submitted="x",
-                    reviewed_at=STARTED,
+                    comment="x",
+                    recorded_at=STARTED,
                 )
-            ]
+            }
             courses = {sibling: "CS 2 (PU) -> CS3243"}
             html = panel_html(
-                item, PROGRESS, log, dry_run=True, existing="kept <below>", courses=courses
+                item, PROGRESS, outcomes, dry_run=True, existing="kept <below>", courses=courses
             )
             ordered(
                 html,
@@ -489,24 +400,24 @@ class ReviewTests(unittest.TestCase):
             self.assertNotIn("remapping<", html, "verdicts are shown in title case")
             self.assertNotIn("Details", html)
             self.assertNotIn("decided", html)
-            self.assertNotIn(requests[0].request_id, html)
+            self.assertNotIn(first, html)
             self.assertNotIn(sibling, html)
             self.assertNotIn('class="selected"', html)
             self.assertNotIn("Better fit <b>", html)
             self.assertNotIn("<planning>", html)
             self.assertNotIn("fresh", html)
-            self.assertNotIn("Dry run", panel_html(item, PROGRESS, [], dry_run=False))
+            self.assertNotIn("Dry run", panel_html(item, PROGRESS, {}, dry_run=False))
 
     def test_panel_without_fallback_verdict_offers_no_selection_and_names_siblings_by_id(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory)
-            queue, _ = load_queue(run, decisions)
-            item = next(i for i in queue if i.request.request_id == requests[0].request_id)
-            item.decision.fallback_rationale = "No defensible alternative."
-            item.decision.concerns = []
-            html = panel_html(item, PROGRESS, [], dry_run=False)
+            store, versions = make_store(directory)
+            first = versions[0].request_id
+            item = next(i for i in queue_of(store) if i.request.request_id == first)
+            item.proposal.fallback_rationale = "No defensible alternative."
+            item.proposal.concerns = []
+            html = panel_html(item, PROGRESS, {}, dry_run=False)
             ordered(
                 html,
                 'class="tabs"',
@@ -526,11 +437,11 @@ class ReviewTests(unittest.TestCase):
             self.assertNotIn("Decision:</b> No", html)
             self.assertNotIn("Remap", html)
             self.assertNotIn("Concerns", html)
-            item.decision.fallback_rationale = None
-            self.assertIn("No fallback", panel_html(item, PROGRESS, [], dry_run=False))
-            self.assertIn("Previous comments", panel_html(item, PROGRESS, [], False, existing="x"))
+            item.proposal.fallback_rationale = None
+            self.assertIn("No fallback", panel_html(item, PROGRESS, {}, dry_run=False))
+            self.assertIn("Previous comments", panel_html(item, PROGRESS, {}, False, existing="x"))
             self.assertNotIn("Previous comments", html)
-            self.assertIn(f"{requests[1].request_id}: not yet submitted", html)
+            self.assertIn(f"{versions[1].request_id}: not yet submitted", html)
             self.assertNotIn("different action", html)
 
     def test_header_badges_colour_confidence_and_overlap(self) -> None:
@@ -545,8 +456,8 @@ class ReviewTests(unittest.TestCase):
             ("low", 20, (RED, RED)),
         ]
         for confidence, overlap, colours in cases:
-            advice = decision(request, decision_confidence=confidence, overlap_percentage=overlap)
-            html = panel_html(Item(advice, request), PROGRESS, [], dry_run=False)
+            advice = proposal(request, confidence=confidence, overlap_percentage=overlap)
+            html = panel_html(Item(advice, request, "hash"), PROGRESS, {}, dry_run=False)
             badge = f'style="background:{colours[0]}">{confidence.title()} Confidence<'
             self.assertIn(badge, html)
             self.assertGreater(html.index(badge), html.index("</header>"), "not in the header")
@@ -561,138 +472,147 @@ class ReviewTests(unittest.TestCase):
 
     def test_prefills_offer_the_fallback_only_when_there_is_one(self) -> None:
         _, request = records()[0]
-        prefills = decision(request, **FALLBACK).prefills("older")
+        prefills = proposal(request, **FALLBACK).prefills("older")
         self.assertEqual(list(prefills), ["recommended", "fallback"])
         self.assertEqual(prefills["fallback"], FALLBACK["fallback_comment"] + "\n\nolder")
-        self.assertEqual(list(decision(request).prefills(None)), ["recommended"])
+        self.assertEqual(list(proposal(request).prefills(None)), ["recommended"])
 
-    def test_loop_logs_every_outcome_and_stops_when_unverified(self) -> None:
+    def test_loop_stores_submissions_only_and_stops_when_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory)
+            store, versions = make_store(directory)
+            requests = [v.request for v in versions]
             approve, reject = button_for("approve"), button_for("reject")
-            ids = [r.request_id for r in requests]
+            ids = ids_of(versions)
             edited = "Approved: the syllabus covers search & <planning>. Also fine."
             stale = copy.deepcopy(requests[3])
             stale.status = "Approved"
             site = FakeSite(
                 {
-                    ids[0]: Clicked(approve, decision(requests[0]).comment),
+                    ids[0]: Clicked(approve, proposal(requests[0]).comment),
                     ids[1]: Clicked(reject, edited),
                     ids[2]: Skipped(f"{SKIPPED}: busy"),
                 },
                 live={ids[3]: stale},
             )
-            log = {e.request_id: e for e in review(site, run, decisions)}
+            log = review(site, store.root)
             self.assertEqual(len(site.prepared), 3, "The stale request never gets a panel")
-            self.assertEqual([log[i].action for i in ids], ["approve", "reject", "skip", "skip"])
-            self.assertEqual(log[ids[1]].comment_submitted, edited)
+            self.assertEqual(
+                site.students, [r.identity.student_id for _, r in records()[:4]], "real IDs"
+            )
+            self.assertEqual(
+                [action_of(log[i]) for i in ids], ["approve", "reject", "skip", "skip"]
+            )
+            rejected = log[ids[1]]
+            assert isinstance(rejected, Outcome)
+            self.assertEqual(rejected.comment, edited)
             self.assertEqual(log[ids[2]].reason, "skipped by the reviewer: busy")
             self.assertIsNone(log[ids[0]].reason, "A status other than pending verifies")
             self.assertIn("Approved", log[ids[3]].reason or "")
-            self.assertEqual({e.request_id: e for e in load_reviewed(decisions / REVIEWED)}, log)
+            self.assertEqual(stored_outcomes(store), {i: log[i] for i in ids[:2]})
+            self.assertTrue((store.root / versions[0].path(OUTCOMES)).exists())
 
             # A second session offers only the skipped ones and records a cancel.
             site = FakeSite({ids[2]: Clicked("#ICList", None), ids[3]: Skipped(SKIPPED)})
-            second = {e.request_id: e for e in review(site, run, decisions)}
+            second = review(site, store.root)
             self.assertEqual(sorted(site.opened), sorted(ids[2:]))
-            self.assertEqual({e.action for e in second.values()}, {"skip"})
+            self.assertEqual({action_of(e) for e in second.values()}, {"skip"})
             self.assertIn("Cancel", second[ids[2]].reason or "")
             self.assertEqual(second[ids[3]].reason, SKIPPED)
-            self.assertEqual(len(load_reviewed(decisions / REVIEWED)), 6)
+            self.assertEqual(len(stored_outcomes(store)), 2, "skips are not stored")
             panels = [panel for _, panel, _ in site.prepared]
             ordered(panels[0], "width:50%", "1 of 2 this session &middot; 2 of 4 overall")
             ordered(panels[1], "width:100%", "2 of 2 this session &middot; 2 of 4 overall")
 
     def test_dry_run_and_unverified_submission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory, count=2)
-            ids = [r.request_id for r in requests]
+            store, versions = make_store(directory, count=2)
+            ids = ids_of(versions)
             site = FakeSite({ids[0]: Skipped(SKIPPED), ids[1]: Skipped(SKIPPED)})
-            log = review(site, run, decisions, dry_run=True)
-            self.assertEqual([e.action for e in log], ["skip", "skip"])
+            log = review(site, store.root, dry_run=True)
+            self.assertEqual([action_of(e) for e in log.values()], ["skip", "skip"])
             self.assertTrue(all(dry for _, _, dry in site.prepared))
-            self.assertFalse((decisions / REVIEWED).exists(), "A dry run is not logged")
+            self.assertFalse((store.root / OUTCOMES).exists(), "A dry run stores nothing")
             outcomes = {i: Clicked(button_for("approve"), "c") for i in ids}
             site = FakeSite(outcomes, status_after=PENDING)
             with self.assertRaisesRegex(RuntimeError, "not verified"):
-                review(site, run, decisions)
-            entries = load_reviewed(decisions / REVIEWED)
-            self.assertEqual(entries[-1].action, "approve")
-            self.assertIn("not verified", entries[-1].reason or "")
-            self.assertEqual(len(entries), 1)
+                review(site, store.root)
+            (entry,) = stored_outcomes(store).values()
+            self.assertEqual(entry.action, "approve")
+            self.assertIn("not verified", entry.reason or "")
 
-    def test_leaving_the_page_and_a_vanished_request_are_logged_as_skips(self) -> None:
+    def test_leaving_the_page_skips_and_a_vanished_request_is_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory, count=3)
-            ids = [r.request_id for r in requests]
+            store, versions = make_store(directory, count=3)
+            ids = ids_of(versions)
             site = FakeSite(
                 {ids[0]: Skipped("reviewer left the page"), ids[2]: Skipped(SKIPPED)},
                 live={ids[1]: NotInQueueError("gone")},
             )
-            log = {e.request_id: e for e in review(site, run, decisions)}
+            log = review(site, store.root)
             self.assertEqual(
                 sorted(site.opened), sorted(ids), "The loop continues past a vanished request"
             )
-            self.assertEqual([log[i].action for i in ids], ["skip"] * 3)
+            self.assertEqual([action_of(log[i]) for i in ids], ["skip", NOT_IN_QUEUE, "skip"])
             self.assertEqual(log[ids[0]].reason, "reviewer left the page")
-            self.assertEqual(log[ids[1]].reason, "no longer in the approval queue")
             self.assertEqual(sorted(r for r, _, _ in site.prepared), sorted([ids[0], ids[2]]))
-            self.assertEqual(log[ids[1]].reason, VANISHED)
-            # A vanished request is final: the next session neither opens nor re-logs it.
+            self.assertIsNone(log[ids[1]].reason)
+            self.assertEqual(stored_outcomes(store), {ids[1]: log[ids[1]]})
+            # A vanished request is closed: the next session neither opens nor re-stores it.
             site = FakeSite({ids[0]: Skipped(SKIPPED), ids[2]: Skipped(SKIPPED)})
-            second = review(site, run, decisions)
+            second = review(site, store.root)
             self.assertEqual(sorted(site.opened), sorted([ids[0], ids[2]]))
-            self.assertEqual(sorted(e.request_id for e in second), sorted([ids[0], ids[2]]))
-            self.assertEqual(len(load_reviewed(decisions / REVIEWED)), 5)
+            self.assertEqual(sorted(second), sorted([ids[0], ids[2]]))
+            self.assertEqual(len(stored_outcomes(store)), 1)
             with self.assertRaisesRegex(RuntimeError, "boom"):
-                review(FakeSite({}, live=dict.fromkeys(ids, RuntimeError("boom"))), run, decisions)
+                review(FakeSite({}, live=dict.fromkeys(ids, RuntimeError("boom"))), store.root)
 
     def test_click_is_on_record_before_verification_and_survives_a_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory, count=2)
-            ids = [r.request_id for r in requests]
-            comment = decision(requests[0]).comment
+            store, versions = make_store(directory, count=2)
+            ids = ids_of(versions)
+            comment = proposal(versions[0].request).comment
             outcomes = {i: Clicked(button_for("approve"), comment) for i in ids}
             site = FakeSite(outcomes, status_after=RuntimeError("browser went away"))
             with self.assertRaisesRegex(RuntimeError, "browser went away"):
-                review(site, run, decisions)
-            (entry,) = load_reviewed(decisions / REVIEWED)
+                review(site, store.root)
+            ((stored_id, entry),) = stored_outcomes(store).items()
             first, other = site.opened[0], next(i for i in ids if i != site.opened[0])
-            self.assertEqual((entry.request_id, entry.action), (first, "approve"))
-            self.assertEqual(entry.comment_submitted, comment)
+            self.assertEqual((stored_id, entry.action), (first, "approve"))
+            self.assertEqual(entry.comment, comment)
             self.assertEqual(entry.reason, f"{UNVERIFIED}: browser went away")
-            # The provisional entry is final: the next session offers only the other request.
+            # The provisional outcome is final: the next session offers only the other request.
             site = FakeSite(outcomes)
-            log = review(site, run, decisions)
-            self.assertEqual([e.request_id for e in log], [other])
+            log = review(site, store.root)
+            self.assertEqual(list(log), [other])
             self.assertEqual(site.opened, [other])
-            entries = load_reviewed(decisions / REVIEWED)
-            self.assertEqual([e.request_id for e in entries], [first, other])
-            self.assertEqual(entries[1].reason, None)
+            stored = stored_outcomes(store)
+            self.assertEqual(sorted(stored), sorted(ids))
+            self.assertEqual(stored[other].reason, None)
 
     def test_request_that_left_the_queue_counts_as_verified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory, count=1)
+            store, (version,) = make_store(directory, count=1)
             remap = button_for("request remapping")
-            advice = decision(requests[0], **FALLBACK)
-            (decisions / f"{requests[0].request_id}.yaml").write_text(dump(plain(advice)))
+            advice = proposal(version.request, **FALLBACK)
+            write_proposal(store, version, advice)
             outcome = Clicked(remap, advice.prefills(None)["fallback"])
-            site = FakeSite({requests[0].request_id: outcome}, status_after=NOT_IN_QUEUE)
-            (entry,) = review(site, run, decisions)
+            site = FakeSite({version.request_id: outcome}, status_after=NOT_IN_QUEUE)
+            (entry,) = review(site, store.root).values()
+            assert isinstance(entry, Outcome)
             self.assertEqual(entry.action, "request remapping")
-            self.assertEqual(entry.comment_submitted, FALLBACK["fallback_comment"])
+            self.assertEqual(entry.comment, FALLBACK["fallback_comment"])
             self.assertIsNone(entry.reason)
 
     def test_bad_comment_is_never_prefilled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            run, decisions, requests = make_run(directory, count=1)
-            path = decisions / f"{requests[0].request_id}.yaml"
-            path.write_text(dump(plain(decision(requests[0], comment="Use [code]"))))
+            store, (version,) = make_store(directory, count=1)
+            write_proposal(store, version, proposal(version.request, comment="Use [code]"))
             site = FakeSite({})
-            log = review(site, run, decisions)
+            (entry,) = review(site, store.root).values()
             self.assertEqual(site.prepared, [])
-            self.assertEqual(log[0].action, "skip")
-            self.assertIn("[", log[0].reason or "")
+            self.assertIsInstance(entry, Skipped)
+            self.assertIn("[", entry.reason or "")
+            self.assertEqual(stored_outcomes(store), {})
 
     def test_injected_hook_reports_skip_confirm_click_and_cancel(self) -> None:
         buttons = "".join(
@@ -732,8 +652,8 @@ class ReviewTests(unittest.TestCase):
             </script></body></html>"""
         _, request = records()[0]
         # Enough overlap lines to make the panel body scroll in a 720px-high viewport.
-        advice = decision(request, overlap=[f"Topic {n}" for n in range(80)], **FALLBACK)
-        panel = panel_html(Item(advice, request), PROGRESS, [], dry_run=False)
+        advice = proposal(request, overlap=[f"Topic {n}" for n in range(80)], **FALLBACK)
+        panel = panel_html(Item(advice, request, "hash"), PROGRESS, {}, dry_run=False)
         approve, reject = button_for("approve"), button_for("reject")
         remap = button_for("request remapping")
         recommended, fallback = advice.prefills("prior").values()
@@ -1025,8 +945,9 @@ class ReviewTests(unittest.TestCase):
             browser.close()
 
     def test_review_arguments(self) -> None:
-        args = parse_args(["review", "--run", "out/x", "--request-id", "a", "--verdict", "reject"])
-        self.assertEqual(args.decisions, str(Path("out/x-anonymized/decisions")))
+        args = parse_args(["review", "--store", "s", "--request-id", "a", "--verdict", "reject"])
+        self.assertEqual(args.store, "s")
+        self.assertFalse(hasattr(args, "proposals"))
         self.assertEqual((args.request_ids, args.verdicts), (["a"], ["reject"]))
         self.assertFalse(args.dry_run)
         self.assertEqual(args.timeout_ms, 60000)
@@ -1041,9 +962,9 @@ if __name__ == "__main__":
 
 
 class PrefillTests(unittest.TestCase):
-    def test_decision_comment_goes_on_top_of_existing_text(self) -> None:
+    def test_proposal_comment_goes_on_top_of_existing_text(self) -> None:
         _, request = records()[0]
-        advice = decision(request)
+        advice = proposal(request)
         self.assertEqual(advice.prefills(None)["recommended"], advice.comment)
         self.assertEqual(advice.prefills("  ")["recommended"], advice.comment)
         self.assertEqual(
@@ -1052,11 +973,11 @@ class PrefillTests(unittest.TestCase):
 
     def test_panel_shows_the_existing_comment(self) -> None:
         _, request = records()[0]
-        item = Item(decision(request), request)
-        html = panel_html(item, Progress(1, 1, 0, 1), [], False, existing="kept <below>")
+        item = Item(proposal(request), request, "hash")
+        html = panel_html(item, Progress(1, 1, 0, 1), {}, False, existing="kept <below>")
         self.assertIn("Previous comments", html)
         self.assertIn("kept &lt;below&gt;", html)
-        self.assertNotIn("Previous comments", panel_html(item, Progress(1, 1, 0, 1), [], False))
+        self.assertNotIn("Previous comments", panel_html(item, Progress(1, 1, 0, 1), {}, False))
 
 
 def test_forget_downloads_clears_history_tables(tmp_path: Path) -> None:

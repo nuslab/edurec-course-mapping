@@ -1,21 +1,18 @@
-"""Cap-aware extraction loop with checkpoints to the run directory."""
+"""Cap-aware extraction loop collecting the requests of one export in memory."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from pathlib import Path
+from dataclasses import astuple
 from typing import Protocol
 
 from .browser import list_identity, subdivide, validate_rows
 from .models import (
-    Document,
+    Export,
     Listing,
     ListRow,
     Partition,
     Request,
-    SearchAudit,
 )
-from .store import document, reset, save
 
 
 class Site(Protocol):
@@ -25,14 +22,6 @@ class Site(Protocol):
     def next_page(self) -> Listing: ...
     def request(self, row: ListRow) -> Request: ...
     def back(self) -> Listing: ...
-
-
-Checkpoint = Callable[[Request | None], None]
-"""Rewrite the inventory and, when given, the one request that changed."""
-
-
-def checkpoint(data: Document, output: str | Path) -> Checkpoint:
-    return lambda request: save(data, output, [request] if request else [])
 
 
 def restore_list(site: Site, current: Listing, total: int) -> Listing:
@@ -53,21 +42,17 @@ def restore_list(site: Site, current: Listing, total: int) -> Listing:
 
 
 class Extraction:
-    """One run's state: the export so far and the request ids already collected."""
+    """One export's state: the requests so far and the identities already collected."""
 
-    def __init__(
-        self, site: Site, data: Document, checkpoint: Checkpoint, reassign_id: str, rows: int | None
-    ) -> None:
+    def __init__(self, site: Site, data: Export, reassign_id: str, rows: int | None) -> None:
         self.site = site
         self.data = data
-        self.checkpoint = checkpoint
         self.reassign_id = reassign_id.casefold()
         self.rows = rows
-        self.known: set[str] = set()
+        self.known: set[tuple[str, ...]] = set()
 
-    def scan(self, partition: Partition, current: Listing, audit: SearchAudit) -> bool:
+    def scan(self, partition: Partition, current: Listing, total: int) -> bool:
         """Walk every page of an uncapped search; True when the row limit stopped it."""
-        total = audit.reported_rows
         visited = 0
         seen_pages: set[str] = set()
         while current.rows:
@@ -105,31 +90,26 @@ class Extraction:
             "sequence", identity.sequence
         ):
             raise RuntimeError("Mapping detail is outside the requested search partition")
-        if request.request_id in self.known:
-            self.data.duplicate_details += 1
-            self.checkpoint(None)
+        key = astuple(identity)
+        if key in self.known:
             return
-        self.known.add(request.request_id)
+        self.known.add(key)
         self.data.requests.append(request)
         print(f"Extracted {len(self.known)} unique requests", flush=True)
-        self.checkpoint(request)
 
 
 def export(
     site: Site,
-    output: str | Path,
+    data: Export,
     *,
     reassign_id: str = "",
     rows: int | None = None,
     terms: list[str] | None = None,
-) -> Document:
+) -> None:
+    """Collect every matching request into `data`, which keeps what was collected on error."""
     if terms is not None and not terms:
         raise ValueError("The configured term list must not be empty")
-    data = document()
-    data.reassign_id, data.terms, data.row_limit = reassign_id or None, terms, rows
-    reset(output)
-    write = checkpoint(data, output)
-    run = Extraction(site, data, write, reassign_id, rows)
+    run = Extraction(site, data, reassign_id, rows)
     queue = (
         [Partition(term_low=int(code), term_high=int(code)) for code in terms]
         if terms is not None
@@ -145,8 +125,6 @@ def export(
             current = site.search(partition)
             validate_rows(partition, current.rows)
             total = current.span()[2]
-            audit = SearchAudit(criteria=partition, reported_rows=total)
-            data.search_partitions.append(audit)
             print(
                 f"Search terms {partition.term_low:04d}-{partition.term_high:04d}: "
                 f"{total} rows{' (capped; subdividing)' if current.capped else ''}",
@@ -154,21 +132,12 @@ def export(
             )
             if current.capped:
                 queue[0:0] = subdivide(partition, current.rows)
-                audit.status = "subdivided"
-                write(None)
                 continue
-            if run.scan(partition, current, audit):
-                audit.status = "row_limit_reached"
+            if run.scan(partition, current, total):
                 data.status = "row_limit_reached"
-                write(None)
-                return data
-            audit.status = "complete"
-            write(None)
+                return
         data.status = "complete"
-        write(None)
-        return data
     except BaseException as exc:
         data.status = "interrupted"
         data.error = str(exc) or type(exc).__name__
-        write(None)
         raise

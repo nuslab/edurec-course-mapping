@@ -1,18 +1,18 @@
 """Read-only extraction of NUS EduRec course mapping approval requests."""
 
 from .export import export
-from .models import Decision, Document, LinkedDocument, ListRow, Partition, Request, Reviewed
+from .models import Export, LinkedDocument, ListRow, Outcome, Partition, Proposal, Request
 from .parse import detail, listing
 from .review import review
 
 __all__ = [
-    "Decision",
-    "Document",
+    "Export",
     "LinkedDocument",
     "ListRow",
+    "Outcome",
     "Partition",
+    "Proposal",
     "Request",
-    "Reviewed",
     "detail",
     "export",
     "listing",

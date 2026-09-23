@@ -1,40 +1,38 @@
-"""Stage 3: replace student identity in an export with per-run pseudonyms."""
+"""Keyed identifiers: the `request_id` and student pseudonym stored in place of the real identity.
+
+Both are HMAC-SHA256 digests under the store's secret, so they are stable across
+exports yet cannot be reversed by hashing candidate student IDs without the secret.
+"""
 
 from __future__ import annotations
 
 import copy
 import hashlib
-import secrets
-from pathlib import Path
+import hmac
+import json
+from dataclasses import replace
 
-from .models import Document
+from .models import Identity, Request, plain
 
 
-def anonymize(data: Document, salt: str | None = None) -> Document:
-    """Return an anonymized deep copy; the original export is left untouched.
+def keyed(secret: bytes, value: str, length: int) -> str:
+    return hmac.new(secret, value.encode(), hashlib.sha256).hexdigest()[:length]
 
-    Student IDs become `student-<hex>` pseudonyms that are consistent within the
-    copy, so a student's requests can still be grouped, but the salt is random
-    per run and never stored, so the pseudonyms cannot be reversed or matched
-    across exports.
-    """
-    salt = salt if salt is not None else secrets.token_hex(16)
-    pseudonyms: dict[str, str] = {}
 
-    def pseudonym(student_id: str) -> str:
-        if student_id not in pseudonyms:
-            digest = hashlib.sha256(f"{salt}:{student_id}".encode()).hexdigest()
-            pseudonyms[student_id] = f"student-{digest[:12]}"
-        return pseudonyms[student_id]
+def request_id(secret: bytes, identity: Identity) -> str:
+    """The request's key: a digest of its seven identity values in canonical JSON."""
+    return keyed(secret, json.dumps(plain(identity), sort_keys=True), 24)
 
-    result = copy.deepcopy(data)
-    for request in result.requests:
-        request.identity.student_id = pseudonym(request.identity.student_id)
-    result.anonymized = True
+
+def pseudonym(secret: bytes, student_id: str) -> str:
+    return f"student-{keyed(secret, student_id, 12)}"
+
+
+def anonymize(request: Request, secret: bytes) -> Request:
+    """A copy keyed by `request_id` with the student ID replaced; the original is untouched."""
+    result = copy.deepcopy(request)
+    result.request_id = request_id(secret, request.identity)
+    result.identity = replace(
+        result.identity, student_id=pseudonym(secret, request.identity.student_id)
+    )
     return result
-
-
-def anonymized_path(output: str | Path) -> Path:
-    """`module-mappings` -> `module-mappings-anonymized`."""
-    path = Path(output)
-    return path.with_name(f"{path.name}-anonymized")

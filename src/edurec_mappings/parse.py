@@ -22,7 +22,6 @@ from .models import (
     PartnerCourse,
     Request,
     Student,
-    plain,
 )
 
 GRID = "tdgbrPTS_CFG_CL_STD_RSL$0"
@@ -110,7 +109,6 @@ def detail(soup: BeautifulSoup) -> Request:
         sequence=required("sequence", field("TRNSFR_EQVLNCY_SEQ")),
     )
     return Request(
-        request_id=digest(plain(identity)),
         identity=identity,
         mapping_type=field("N_PU_MAP"),
         student=Student(

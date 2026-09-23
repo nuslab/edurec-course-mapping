@@ -1,11 +1,12 @@
-"""Stage 4: show each decision to the reviewer on its EduRec detail page and log what they did.
+"""Stage 4: show each proposal to the reviewer on its EduRec detail page and log what they did.
 
-The program reopens a request, pre-fills the comment box with the decision's
-comment and injects a panel with the decision. The reviewer presses one of
+The program reopens a request, pre-fills the comment box with the proposal's
+comment and injects a panel with the proposal. The reviewer presses one of
 EduRec's own buttons (or the panel's Skip); the program never does. After the
 postback it verifies that the status left "Pending Approval" (a request that
-disappeared from the approval queue counts as verified) and appends a
-`Reviewed` entry to `decisions/reviewed.yaml`; a dry run logs nothing.
+disappeared from the approval queue counts as verified) and writes an `Outcome`
+file to `outcomes/<request_id>/<hash>.yaml`, as it does for a request that left the
+queue before it was opened; skips and dry runs write nothing.
 
 Only clicks made while the panel is shown are observed and logged.
 """
@@ -13,39 +14,34 @@ Only clicks made while the panel is shown are observed and logged.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
-import yaml
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
-from .anonymize import anonymized_path
 from .browser import BUTTONS, NotInQueueError
 from .models import (
     AMBER,
     GREEN,
+    NOT_IN_QUEUE,
     PENDING,
     RED,
     VERDICT_COLOURS,
     Confidence,
-    Decision,
     Outcome,
+    Proposal,
+    Reaction,
     Request,
-    Reviewed,
     Skipped,
     display,
     hydrate,
     plain,
 )
-from .store import INVENTORY, REQUESTS, dump, now, write_atomic
+from .store import OUTCOMES, PROPOSALS, Store, Version, dump, load, now, write_atomic
 
-DECISIONS = "decisions"
-REVIEWED = "reviewed.yaml"
-VANISHED = "no longer in the approval queue"
-"""Skip reason for a request that left the approval queue; final, since it cannot return."""
 UNVERIFIED = "submission observed, not yet verified"
 """Reason on the provisional entry written the moment the reviewer's click is seen."""
 FRESHNESS_FIELDS = (
@@ -67,41 +63,16 @@ TEMPLATES.filters["display"] = display
 PANEL = TEMPLATES.get_template("panel.html")
 
 
-class Log:
-    """`decisions/reviewed.yaml`: every change is written through at once, atomically.
-
-    A dry run keeps its entries in memory only: it can only skip, and skips are
-    offered again anyway.
-    """
-
-    def __init__(self, path: Path, dry_run: bool = False) -> None:
-        self.path = path
-        self.dry_run = dry_run
-        self.entries = load_reviewed(path)
-
-    def append(self, entry: Reviewed) -> None:
-        self.entries.append(entry)
-        self.flush()
-
-    def replace_last(self, entry: Reviewed) -> None:
-        self.entries[-1] = entry
-        self.flush()
-
-    def flush(self) -> None:
-        if not self.dry_run:
-            write_atomic(self.path, dump([plain(entry) for entry in self.entries]))
-
-
 class Progress(NamedTuple):
-    """The header's counters: the session position and how far the run is."""
+    """The header's counters: the session position and how far the store is."""
 
     position: int
     total: int
     """Requests in this session's queue."""
     submitted: int
-    """Requests logged with a verdict, across all sessions."""
+    """Requests whose latest version was reviewed with a verdict, across all sessions."""
     requests: int
-    """Requests in the run."""
+    """Requests in the store."""
 
 
 class Site(Protocol):
@@ -110,10 +81,10 @@ class Site(Protocol):
     def open(self, request: Request) -> Request:
         """Reopen the request; raises `NotInQueueError` when it left the approval queue."""
 
-    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> None:
+    def prepare(self, proposal: Proposal, panel: str, dry_run: bool) -> None:
         """Pre-fill the comment box and inject the panel."""
 
-    def await_action(self) -> Outcome:
+    def await_action(self) -> Reaction:
         """The reviewer's click, or a skip: the panel's Skip or the detail page going away."""
 
     def status(self, request: Request) -> str | None:
@@ -122,112 +93,74 @@ class Site(Protocol):
 
 @dataclass
 class Item:
-    """A decision paired with the original export's request it applies to."""
+    """A proposal with the request version it was made on, the real student ID restored."""
 
-    decision: Decision
+    proposal: Proposal
     request: Request
+    version: str
+    """The request version's content hash, which names its proposal and outcome files."""
 
 
-def started_at(run: Path) -> str:
-    inventory = yaml.safe_load((run / INVENTORY).read_text(encoding="utf-8"))
-    return str(inventory["started_at"])
-
-
-def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict[str, str]]:
-    """Pair each decision with its exported request, siblings consecutive.
-
-    Returns the queue and, keyed by request id, why other decisions were left out:
-    made from another export, or without a request file in `run`.
-    """
-    run, decisions = Path(run), Path(decisions)
-    expected = started_at(decisions.parent)
-    if started_at(run) != expected:
-        raise RuntimeError(f"{decisions} belongs to a different export than {run}")
-    items: list[Item] = []
-    rejected: dict[str, str] = {}
-    for path, data in decision_files(decisions):
-        try:
-            decision = hydrate(Decision, data)
-        except ValueError as error:
-            raise ValueError(f"{path}: {error}") from error
-        request_path = run / REQUESTS / f"{decision.request_id}.yaml"
-        if decision.source_started_at != expected:
-            rejected[decision.request_id] = (
-                f"decided on export {decision.source_started_at}, current is {expected}"
-            )
-        elif not request_path.exists():
-            rejected[decision.request_id] = f"no requests/{request_path.name} in {run}"
-        else:
-            request = hydrate(Request, yaml.safe_load(request_path.read_text(encoding="utf-8")))
-            items.append(Item(decision, request))
-    first_seen: dict[tuple[str, ...], int] = {}
-    for index, item in enumerate(items):
-        first_seen.setdefault(item.request.identity.mapping, index)
-    items.sort(key=lambda item: first_seen[item.request.identity.mapping])
-    return items, rejected
-
-
-def decision_files(decisions: Path) -> Iterator[tuple[Path, object]]:
-    """Each decision file and its parsed content, in file-name order; the log is not one."""
-    for path in sorted(decisions.glob("*.yaml")):
-        if path.name != REVIEWED:
-            yield path, yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def load_reviewed(path: Path) -> list[Reviewed]:
-    if not path.exists():
-        return []
-    entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
-    return [hydrate(Reviewed, entry) for entry in entries]
-
-
-def since_export(log: Iterable[Reviewed], started: str | None) -> list[Reviewed]:
-    """The log entries made after the export started.
-
-    A request id survives resubmission: a request submitted before the export was
-    taken and exported again as pending is a new round, so its earlier entries
-    do not count against it. Entries whose timestamp cannot be read are kept.
-    """
-    if started is None:
-        return list(log)
+def load_proposal(path: Path) -> Proposal:
     try:
-        cutoff = datetime.fromisoformat(started)
-    except ValueError:
-        return list(log)
-    kept: list[Reviewed] = []
-    for entry in log:
-        try:
-            if datetime.fromisoformat(entry.reviewed_at) < cutoff:
-                continue
-        except ValueError:
-            pass
-        kept.append(entry)
-    return kept
+        return hydrate(Proposal, load(path))
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from error
+
+
+def submitted(outcomes: Mapping[str, Outcome]) -> dict[str, Outcome]:
+    """The outcomes that record a submitted verdict, not a request that left the queue."""
+    return {key: entry for key, entry in outcomes.items() if entry.action != NOT_IN_QUEUE}
+
+
+def action_of(entry: Outcome | Skipped) -> str:
+    """What happened, for the session log: the outcome's action, or `skip`."""
+    return "skip" if isinstance(entry, Skipped) else entry.action
+
+
+def load_outcomes(store: Store, latest: Iterable[Version]) -> dict[str, Outcome]:
+    """The review of each request's latest version, by request id."""
+    outcomes: dict[str, Outcome] = {}
+    for version in latest:
+        path = store.file(OUTCOMES, version.request_id, version.hash)
+        if path.exists():
+            outcomes[version.request_id] = hydrate(Outcome, load(path))
+    return outcomes
+
+
+def load_queue(store: Store, latest: Iterable[Version]) -> list[Item]:
+    """Latest versions with a proposal and no outcome, in store order (siblings consecutive).
+
+    The stored request is anonymized; its real student ID comes from
+    `private/identities.yaml` so that EduRec can be searched for it.
+    """
+    identities = store.identities()
+    items: list[Item] = []
+    for version in latest:
+        request_id = version.request_id
+        path = store.file(PROPOSALS, request_id, version.hash)
+        if not path.exists() or store.file(OUTCOMES, request_id, version.hash).exists():
+            continue
+        if request_id not in identities:
+            raise RuntimeError(f"{request_id} has no student ID in the store's identities")
+        request = replace(
+            version.request,
+            identity=replace(version.request.identity, student_id=identities[request_id]),
+        )
+        items.append(Item(load_proposal(path), request, version.hash))
+    return items
 
 
 def select(
-    queue: Iterable[Item],
-    log: Iterable[Reviewed],
-    request_ids: Iterable[str] = (),
-    verdicts: Iterable[str] = (),
-    started: str | None = None,
+    queue: Iterable[Item], request_ids: Iterable[str] = (), verdicts: Iterable[str] = ()
 ) -> list[Item]:
-    """Drop requests already submitted and apply the CLI filters.
-
-    Skips are offered again, except a request that left the approval queue:
-    it cannot come back, so its skip is final. Only entries made since the
-    export started (`started`, the export's `started_at`) count: a request
-    resubmitted after an earlier round keeps its id and is offered again.
-    """
-    log = since_export(log, started)
-    done = {entry.request_id for entry in log if entry.action != "skip" or entry.reason == VANISHED}
+    """Apply the CLI filters."""
     ids, wanted = set(request_ids), set(verdicts)
     return [
         item
         for item in queue
-        if item.request.request_id not in done
-        and (not ids or item.request.request_id in ids)
-        and (not wanted or item.decision.verdict in wanted)
+        if (not ids or item.request.request_id in ids)
+        and (not wanted or item.proposal.verdict in wanted)
     ]
 
 
@@ -261,7 +194,7 @@ def overlap_colour(percentage: int) -> str:
 def panel_html(
     item: Item,
     progress: Progress,
-    log: Iterable[Reviewed],
+    outcomes: Mapping[str, Outcome],
     dry_run: bool,
     *,
     existing: str | None = None,
@@ -269,21 +202,21 @@ def panel_html(
 ) -> str:
     """The reviewer's panel from `templates/panel.html`; every value is HTML-escaped.
 
-    `courses` names the siblings, keyed by request id.
+    `outcomes` and `courses` describe the siblings, keyed by request id.
     """
-    decision = item.decision
+    proposal = item.proposal
     return PANEL.render(
-        decision=decision,
+        proposal=proposal,
         request=item.request,
         progress=progress,
         done=round(100 * progress.position / progress.total) if progress.total else 0,
         dry_run=dry_run,
         existing=(existing or "").strip(),
         courses=courses or {},
-        latest={entry.request_id: entry for entry in log if entry.action != "skip"},
+        latest=submitted(outcomes),
         verdict_colours=VERDICT_COLOURS,
         confidence_colours=CONFIDENCE_COLOURS,
-        overlap_colour=overlap_colour(decision.overlap_percentage),
+        overlap_colour=overlap_colour(proposal.overlap_percentage),
     )
 
 
@@ -292,57 +225,41 @@ def review_item(
     item: Item,
     *,
     progress: Progress,
-    log: list[Reviewed],
+    outcomes: Mapping[str, Outcome],
     courses: Mapping[str, str],
     dry_run: bool,
-    record: Callable[[Reviewed], None] = lambda entry: None,
-) -> Reviewed:
-    """Show one decision to the reviewer and return what happened.
+    record: Callable[[Outcome], None] = lambda entry: None,
+) -> Outcome | Skipped:
+    """Show one proposal to the reviewer and return what happened.
 
     `record` is called with a provisional entry as soon as an EduRec button is
     seen pressed, before the submission is verified, so that a failure after
     the click still leaves the verdict on record.
     """
-    decision, exported = item.decision, item.request
+    proposal, exported = item.proposal, item.request
     try:
         live = site.open(exported)
     except NotInQueueError:
         live = None
-    entry = Reviewed(
-        request_id=exported.request_id,
-        verdict_recommended=decision.verdict,
-        action="skip",
-        comment_submitted=None,
-        reviewed_at=now(),
-    )
     if live is None:
-        return replace(entry, reason=VANISHED)
-    reason = stale_reason(exported, live) or comment_problem(decision.comment)
+        return Outcome(action=NOT_IN_QUEUE, comment=None, recorded_at=now())
+    reason = stale_reason(exported, live) or comment_problem(proposal.comment)
     if reason:
-        return replace(entry, reason=reason)
-    panel = panel_html(item, progress, log, dry_run, existing=live.comments, courses=courses)
-    site.prepare(decision, panel, dry_run)
+        return Skipped(reason)
+    panel = panel_html(item, progress, outcomes, dry_run, existing=live.comments, courses=courses)
+    site.prepare(proposal, panel, dry_run)
     clicked = site.await_action()
     if isinstance(clicked, Skipped):
-        return replace(entry, reason=clicked.reason)
+        return clicked
     verdict = BUTTONS.get(clicked.action)
     if verdict is None:
-        return replace(entry, reason="Cancel pressed in EduRec")
-    record(
-        replace(
-            entry,
-            action=verdict,
-            comment_submitted=clicked.comment,
-            reviewed_at=now(),
-            reason=UNVERIFIED,
-        )
-    )
+        return Skipped("Cancel pressed in EduRec")
+    record(Outcome(action=verdict, comment=clicked.comment, recorded_at=now(), reason=UNVERIFIED))
     status_after = site.status(exported)  # Anything but None or pending verifies the submission.
-    return replace(
-        entry,
+    return Outcome(
         action=verdict,
-        comment_submitted=clicked.comment,
-        reviewed_at=now(),
+        comment=clicked.comment,
+        recorded_at=now(),
         reason=(
             f"submission not verified: live status is {status_after!r}"
             if status_after in (None, PENDING)
@@ -353,80 +270,69 @@ def review_item(
 
 def review(
     site: Site,
-    run: str | Path,
-    decisions: str | Path | None = None,
+    root: str | Path,
     *,
     request_ids: Iterable[str] = (),
     verdicts: Iterable[str] = (),
     dry_run: bool = False,
-) -> list[Reviewed]:
-    """Walk the queue with the reviewer; returns this session's log entries.
+) -> dict[str, Outcome | Skipped]:
+    """Walk the queue with the reviewer; returns what happened this session, by request id.
 
-    Every entry is written to `decisions/reviewed.yaml` (except in a dry run)
-    before the next request is opened, and a provisional entry is written the
-    moment a click is seen: an error after the click leaves the verdict on record
-    with the error as reason, then the session stops. A submission whose status
-    did not leave "Pending Approval" is logged with its verdict and a reason, then
-    the session stops: it is never retried. A request that already left the approval queue is logged
-    as a skip and not offered again.
+    A submitted verdict, or a request that already left the approval queue, is
+    written to `outcomes/<request_id>/<hash>.yaml` (except in a dry run) before the
+    next request is opened, which closes that request version; skips are offered
+    again next session. A provisional outcome is written the moment a click is seen:
+    an error after the click leaves the verdict on record with the error as reason,
+    then the session stops. A submission whose status did not leave "Pending
+    Approval" is stored with its verdict and a reason, then the session stops: it
+    is never retried.
     """
-    run = Path(run)
-    decisions = Path(decisions) if decisions else anonymized_path(run) / DECISIONS
-    queue, rejected = load_queue(run, decisions)
-    for request_id, why in rejected.items():
-        print(f"Not applicable {request_id}: {why}", flush=True)
-    log = Log(decisions / REVIEWED, dry_run)
-    started = started_at(decisions.parent)
-    vanished = {
-        entry.request_id
-        for entry in since_export(log.entries, started)
-        if entry.action == "skip" and entry.reason == VANISHED
-    }
-    for request_id in sorted(vanished):
-        print(f"Not applicable {request_id}: {VANISHED}", flush=True)
-    courses = {item.request.request_id: item.request.course for item in queue}
-    queue = select(queue, log.entries, request_ids, verdicts, started)
-    requests = sum(1 for _ in (run / REQUESTS).glob("*.yaml"))
-    session: list[Reviewed] = []
+    store = Store(root)
+    latest = store.latest()
+    outcomes = load_outcomes(store, latest)
+    courses = {version.request_id: version.request.course for version in latest}
+    queue = select(load_queue(store, latest), request_ids, verdicts)
+
+    def record(entry: Outcome, request_id: str, version: str) -> None:
+        outcomes[request_id] = entry
+        if not dry_run:
+            write_atomic(store.file(OUTCOMES, request_id, version), dump(plain(entry)))
+
+    session: dict[str, Outcome | Skipped] = {}
     for position, item in enumerate(queue, 1):
-        submitted = {entry.request_id for entry in log.entries if entry.action != "skip"}
-        progress = Progress(position, len(queue), len(submitted), requests)
-        provisional: Reviewed | None = None
-
-        def record(entry: Reviewed) -> None:
-            nonlocal provisional
-            provisional = entry
-            log.append(entry)
-
+        request_id = item.request.request_id
+        progress = Progress(position, len(queue), len(submitted(outcomes)), len(latest))
         try:
             entry = review_item(
                 site,
                 item,
                 progress=progress,
-                log=log.entries,
+                outcomes=outcomes,
                 courses=courses,
                 dry_run=dry_run,
-                record=record,
+                record=partial(record, request_id=request_id, version=item.version),
             )
         except Exception as error:
+            # A queued version has no review, so one present now is the provisional one.
+            provisional = outcomes.get(request_id)
             if provisional is not None:
-                log.replace_last(replace(provisional, reason=f"{UNVERIFIED}: {error}"))
+                record(
+                    replace(provisional, reason=f"{UNVERIFIED}: {error}"), request_id, item.version
+                )
             raise
-        if provisional is not None:
-            log.replace_last(entry)
-        else:
-            log.append(entry)
-        session.append(entry)
+        if isinstance(entry, Outcome):
+            record(entry, request_id, item.version)
+        session[request_id] = entry
         detail = f" ({entry.reason})" if entry.reason else ""
         print(
-            f"{position}/{len(queue)} {entry.request_id} {item.request.course}: "
-            f"{entry.action}{detail}",
+            f"{position}/{len(queue)} {request_id} {item.request.course}: "
+            f"{action_of(entry)}{detail}",
             flush=True,
         )
-        if entry.reason and entry.action != "skip":
-            raise RuntimeError(f"{entry.request_id}: {entry.reason}")
-    counts = Counter(entry.action for entry in session)
+        if isinstance(entry, Outcome) and entry.reason:
+            raise RuntimeError(f"{request_id}: {entry.reason}")
+    counts = Counter(action_of(entry) for entry in session.values())
     summary = ", ".join(f"{count} {action}" for action, count in sorted(counts.items()))
-    target = "not logged (dry run)" if dry_run else f"→ {log.path}"
+    target = "nothing stored (dry run)" if dry_run else f"→ {store.root / OUTCOMES}"
     print(f"Reviewed {len(session)} of {len(queue)} queued: {summary or 'nothing'} {target}")
     return session

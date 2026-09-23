@@ -15,7 +15,7 @@ from playwright.sync_api import BrowserContext
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from pypdf import PdfReader
 
-from .models import Document, Fetched, LinkedDocument, Request
+from .models import Fetched, LinkedDocument, Request
 from .store import DOCUMENTS
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'　]+", re.I)
@@ -184,24 +184,16 @@ def fetch_documents(
     request.linked_documents = documents
 
 
-def scrape(
-    data: Document,
-    fetch: Fetcher,
-    checkpoint: Callable[[Request], None],
-    render: Renderer | None = None,
-) -> Document:
-    """Stage 2: fetch every URL in the collected requests and add the text to the export.
+def scrape(requests: list[Request], fetch: Fetcher, render: Renderer | None = None) -> None:
+    """Stage 2: fetch every URL in the collected requests and attach the text to them.
 
-    Each URL is fetched once per run; `checkpoint` is called with every request once
-    its documents are known, so the run directory always reflects what was read so far.
-    With `render`, HTML pages that arrive as script shells are re-read in a browser page.
+    Each URL is fetched once per export. With `render`, HTML pages that arrive as
+    script shells are re-read in a browser page.
     """
     cache: dict[str, LinkedDocument] = {}
-    for index, request in enumerate(data.requests, 1):
+    for index, request in enumerate(requests, 1):
         fetch_documents(request, fetch, cache, render)
-        print(f"Scraped URLs for {index}/{len(data.requests)} requests", flush=True)
-        checkpoint(request)
-    return data
+        print(f"Scraped URLs for {index}/{len(requests)} requests", flush=True)
 
 
 def playwright_fetcher(context: BrowserContext, timeout: float) -> Fetcher:

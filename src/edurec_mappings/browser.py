@@ -22,12 +22,12 @@ from .models import (
     TERM_PATTERN,
     VERDICT_COLOURS,
     Clicked,
-    Decision,
     Listing,
     ListRow,
-    Outcome,
     Partition,
+    Proposal,
     RangeField,
+    Reaction,
     Request,
     Skipped,
     Tab,
@@ -210,7 +210,8 @@ class EduRec:
         self.settle(pending.value, old_state, target)
 
     def settle(self, response: Response, old_state: str, target: str | None = None) -> None:
-        response.finished()
+        # No `response.finished()`: the settled wait already implies it, and Playwright leaves
+        # its internal task pending, to fail with "Target closed" when the browser closes.
         if response.status >= 400:
             raise RuntimeError(f"EduRec action failed: HTTP {response.status}")
         wait(self.frame(), "settled", self.timeout_ms, old=old_state, target=target)
@@ -368,7 +369,7 @@ def posted(actions: Collection[str]) -> Callable[[Response], bool]:
 class Reviewer(EduRec):
     """Assists the reviewer on a detail page; the reviewer presses EduRec's own buttons.
 
-    How the click is detected: `prepare` injects the decision panel (in a shadow
+    How the click is detected: `prepare` injects the proposal panel (in a shadow
     root, so page CSS cannot restyle it) and a capture-phase click hook on the
     five buttons. Clicking a panel tab only previews its pane; the tab whose
     "Select" button was pressed (it then reads "Selected" and is disabled)
@@ -398,15 +399,15 @@ class Reviewer(EduRec):
     prior_comment: str = ""
     install: Install
 
-    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> None:
+    def prepare(self, proposal: Proposal, panel: str, dry_run: bool) -> None:
         frame = self.frame()
         self.prior_comment = frame.locator(f'[id="{COMMENTS}"]').input_value()
-        prefills = decision.prefills(self.prior_comment)
+        prefills = proposal.prefills(self.prior_comment)
         self.comment(prefills["recommended"])
         # The hook compares and quotes verdicts in their display form only.
         verdicts: dict[Tab, str | None] = {
-            "recommended": display(decision.verdict),
-            "fallback": display(decision.fallback_verdict) if decision.fallback_verdict else None,
+            "recommended": display(proposal.verdict),
+            "fallback": display(proposal.fallback_verdict) if proposal.fallback_verdict else None,
         }
         self.install = Install(
             panel=panel,
@@ -431,7 +432,7 @@ class Reviewer(EduRec):
         except ValueError:
             return False
 
-    def await_action(self) -> Outcome:
+    def await_action(self) -> Reaction:
         frame = self.frame()
         seen: list[Response] = []
         matches = posted(REVIEWER_ACTIONS)

@@ -1,10 +1,10 @@
 # edurec-mappings
 
 Read-only extraction of NUS EduRec **Course Mapping Approval** requests into
-a run directory of YAML files. The package collects structured evidence, optionally the
+an append-only store of anonymized YAML files. The package collects structured evidence, optionally the
 text of linked syllabus documents, and never decides anything itself. Its
-`review` command (below) walks a human reviewer through the advisor's decisions in
-EduRec; the reviewer presses EduRec's buttons, the program only watches and logs.
+`review` command (below) walks a human reviewer through the advisor's proposals in
+EduRec; the reviewer presses EduRec's buttons, the program only watches and records the outcome.
 
 ## Layout
 
@@ -13,20 +13,21 @@ edurec-mappings/
 ├── pyproject.toml            # package metadata; installs the `edurec-mappings` command
 ├── src/edurec_mappings/
 │   ├── cli.py                # argument parsing, login prompt, browser lifecycle
-│   ├── export.py             # cap-aware search loop with YAML checkpoints
+│   ├── export.py             # cap-aware search loop collecting one export in memory
 │   ├── browser.py            # EduRec navigation (search form, paging, detail, View 100)
 │   ├── page.js               # scripts run in the EduRec frame: settle waits, review panel hook
-│   ├── models.py             # typed dataclasses for the export and decisions; YAML (de)serialisation
+│   ├── models.py             # typed dataclasses for requests, proposals, outcomes; YAML (de)serialisation
 │   ├── parse.py              # list/detail HTML parsing into those records
 │   ├── documents.py          # download and text extraction of URLs in course details
-│   ├── anonymize.py          # pseudonymised copy of an export
-│   ├── review.py             # reviewer walk-through of the decisions, with reviewed.yaml log
+│   ├── anonymize.py          # keyed request ids and student pseudonyms
+│   ├── store.py              # the append-only store: request versions, pending, identities
+│   ├── review.py             # reviewer walk-through of the proposals, one outcome file each
 │   ├── templates/            # Jinja2 review panel (panel.html) and its stylesheet (panel.css)
 │   └── terms.yaml            # terms searched when --term is blank
 └── tests/                    # unittest suite; fixtures/ holds trimmed EduRec pages
 
 ../edurec-data/               # runtime data, kept outside the package and out of Git
-├── output/                   # run directories; contain personal data, keep private
+├── module-mappings/          # the store (below); its private/ holds personal data
 └── browser-profile/          # persisted login state (cookies for EduRec)
 ```
 
@@ -49,23 +50,34 @@ that desktop; do not wrap the command in `xvfb-run`.
 Run from this directory; the default paths are relative to it.
 
 ```sh
-edurec-mappings export --scrape-urls --anonymize --run ../edurec-data/output/module-mappings
+edurec-mappings export --scrape-urls --store ../edurec-data/module-mappings
+edurec-mappings pending --store ../edurec-data/module-mappings
 ```
 
-The command has three subcommands, `export`, `review` and `fetch`;
+The command has four subcommands, `export`, `pending`, `review` and `fetch`;
 `edurec-mappings --help` lists them and `python3 -m edurec_mappings` is
-equivalent. Log in through VNC, accept the
+equivalent. `--store` (required) names the
+store for the first three. Log in through VNC, accept the
 policy if you agree. `export`
-runs three steps once the approval form is visible (detected automatically after login; Enter retries at once): it applies its own search filters, switches the results grid
-to **View 100**, opens every matching request and checkpoints the run
-directory after each detail; with `--scrape-urls` it then fetches every URL
-found in the course details and stores their text under `documents/` (an HTML
+runs once the approval form is visible (detected automatically after login; Enter retries at once): it applies its own search filters, switches the results grid
+to **View 100** and opens every matching request, keeping them in memory;
+with `--scrape-urls` it then fetches every URL
+found in the course details (an HTML
 page whose text is under 1,000 characters is re-read in a browser page so that
 script-rendered catalogues such as Korea University, NYCU and TUMonline yield
 their content rather than a loading shell; Google Drive file links and Google
 Docs links are fetched through their download and export endpoints, which
-serve files shared with anyone without a sign-in); with
-`--anonymize` it finally writes a pseudonymised copy of the run next to it.
+serve files shared with anyone without a sign-in). Finally it adds the
+requests to the store (below) and prints the export status (`complete`,
+`row_limit_reached` or `interrupted`) and how many new versions were stored.
+When collection stops early the requests collected so far are still stored,
+except that with `--scrape-urls` a request is stored only once its documents
+were fetched; the command then exits with an error.
+
+`edurec-mappings pending` prints, one per line and relative to the store, the
+file `requests/<request_id>/<hash>.yaml` of every request whose latest version
+has no proposal yet, parts of a many-to-one mapping consecutively. It is the
+course-mapping advisor's work queue.
 
 | Argument | Supplied | Blank or omitted |
 | --- | --- | --- |
@@ -73,7 +85,6 @@ serve files shared with anyone without a sign-in); with
 | `--term` | One four-digit term code, e.g. `2610` | Every term in `terms.yaml` (override with `--terms-file`) |
 | `--rows` | Stop after this many unique requests | All matching requests |
 | `--scrape-urls` | Fetch URLs in course details and store their text | `linked_documents` stays `null` |
-| `--anonymize` | Also write `<run>-anonymized/` (or `--anonymized-run`) | Original only |
 | `--cdp-url URL --ready` | Attach to a running, logged-in Chromium; left open on exit | Launch a browser on `--profile` and prompt for login |
 
 `export --help` lists the rest (`--profile`, `--proxy`, `--timeout`).
@@ -92,84 +103,98 @@ Observed on 2026-09-21: a blank-term search showed 300 rows, term `2610` showed
 configured term separately and, when a search is capped, splits it by student
 ID, then mapping group and sequence. Inclusive boundaries can overlap, so
 requests are deduplicated by full identity. A search that stays capped after
-every split ends the run with an `interrupted` checkpoint rather than a false
+every split ends the export as `interrupted` rather than with a false
 claim of completeness. Results follow search order, not a global sort.
 
-## Export
+## Store
 
-`--run` names a run directory that is both the export and the checkpoint.
-It is laid out so that an AI advisor can read one request at a time instead of
-the whole inventory:
+The store is append-only: exports add files and nothing is ever deleted or
+reset, so an interrupted export just adds fewer files. It is laid out so that
+an AI advisor can read one request at a time:
 
 ```
 module-mappings/
-├── inventory.yaml            # export audit: filters, status, searched partitions
-├── requests/<request_id>.yaml   # one file per unique request
-├── documents/<hash>.txt      # scraped text, one file per URL (--scrape-urls)
-├── decisions/<request_id>.yaml  # written by the course-mapping advisor, not by this package
-└── decisions/reviewed.yaml    # written by `edurec-mappings review`
+├── requests/<request_id>/<hash>.yaml    # anonymized request versions
+├── proposals/<request_id>/<hash>.yaml   # written by the course-mapping advisor, not by this package
+├── outcomes/<request_id>/<hash>.yaml    # written by `edurec-mappings review`
+├── documents/<url_hash>.txt             # scraped text, latest per URL (--scrape-urls)
+└── private/
+    ├── identities.yaml                  # request_id -> real student ID; read only by review
+    └── secret                           # key of request ids and pseudonyms; never regenerated
 ```
 
-Starting a run removes the first three entries from the directory and leaves
-anything else (including `decisions/`) in place, so use a new path to keep an
-old export. Each decision file records the `source_started_at` of the export
-it was made from, so the approval script can tell which decisions predate the
-current export.
+- `requests/<request_id>/<hash>.yaml` (schema version 7): `schema_version`,
+  `created_at` (when this version was first written), `request_id`, the
+  EduRec identity with the student ID replaced by a pseudonym, the student's
+  programme and terms, the partner course (syllabus, credits, contact hours,
+  assessments, supporting URL), the target NUS course, prerequisites, status,
+  prior comments, `related_request_ids` for sibling parts of a many-to-one
+  mapping, and `linked_documents`: one entry per URL with `status`, `error`,
+  `kind`, `title`, `pages`, `bytes` and `path`. It is `null` unless
+  `--scrape-urls` is set. `path` is relative to the store and set only for
+  `fetched` documents.
+- `<hash>` is 16 hex digits of a digest of the request's content, including
+  the text of each linked document, its comments and `related_request_ids`,
+  but not `created_at`, `schema_version`, the EduRec status or fetch metadata
+  (status, error, size and so on). An export writes a request only when the
+  digest differs from its latest stored version: an unchanged request is not
+  rewritten and a changed one gets a new file beside the old one. The latest
+  version of a request is the one with the latest `created_at`; a request that
+  returns to earlier content rewrites that earlier file with a new
+  `created_at`, which makes it the latest again.
+- Proposals and outcomes are named by the request version they were made on, so
+  a re-export can neither orphan nor misapply them: a request whose content
+  changed is a new version without a proposal and is pending again. The path
+  is their only key; neither file holds a `request_id`.
+- `documents/<url_hash>.txt`: the extracted text, named by a digest of the URL
+  so a document shared by several requests is stored once, and overwritten
+  with the latest text on each export. Text over 200 KB is a textbook rather
+  than a syllabus; it is recorded as `too_large` with its size and title and
+  not stored.
+- `private/secret` holds 32 random bytes (as hex), created by the first export.
+  Both identifiers are keyed with it: `request_id` is the first 24 hex digits
+  of HMAC-SHA256 over the seven identity values (student ID, career, partner
+  university, study program, term, mapping number, sequence) in canonical
+  JSON, and the pseudonym is `student-` followed by the first 12 hex digits of
+  HMAC-SHA256 over the student ID. Both are stable across exports and
+  unaffected by edits to comments or URLs, yet cannot be reversed by trying
+  student IDs without the secret. A new secret would change every identifier
+  and detach every proposal, so back it up with the store.
+- `private/identities.yaml` maps each `request_id` to the real student ID and
+  is merged on every export; only `review` reads it, to search EduRec. Nothing
+  under `requests/`, `proposals/` or `outcomes/` holds a real student ID; do not
+  give the advisor access to `private/`.
 
-- `inventory.yaml` (schema version 5): `started_at`, `status` and `error`,
-  `anonymized`, the requested scope (`reassign_id`, `terms`, `row_limit`), the
-  search-partition audit and the count of duplicate details. It holds no
-  request data or result rows; the requests are the files under `requests/`.
-- `requests/<request_id>.yaml`: the EduRec identity, the student's programme
-  and terms, the partner course (syllabus, credits, contact hours, assessments,
-  supporting URL), the target NUS course, prerequisites, status, prior
-  comments, `related_request_ids` for sibling parts of a many-to-one mapping,
-  and `linked_documents`: one entry per URL with `status`, `error`, `kind`,
-  `title`, `pages`, `bytes` and `path`. It is `null` unless `--scrape-urls`
-  is set. `path` is relative to the run directory and set only for `fetched`
-  documents.
-- `documents/<hash>.txt`: the extracted text, named by a digest of the URL so
-  a document shared by several requests is stored once. Text over 200 KB is a
-  textbook rather than a syllabus; it is recorded as `too_large` with its size
-  and title and not stored.
-
-`request_id` is a digest of the seven identity values (student ID, career,
-partner university, study program, term, mapping number, sequence). It is
-stable across runs, unaffected by edits to comments or URLs, and is the only
-key a decision needs to link back to a request.
-
-`status` is `complete` when every partition and page was scanned,
-`row_limit_reached` for an intentional partial export, or `interrupted` when a
-run stopped early. Only `complete` is an inventory.
-
-The anonymized copy is a complete run directory, documents included. It
-replaces each student ID with a `student-<hex>` pseudonym that is consistent
-within the copy and sets
-`anonymized: true`. The salt is random per run and never stored, so
-pseudonyms cannot be reversed or matched across exports.
+The export status is `complete` when every partition and page was scanned,
+`row_limit_reached` for an intentional partial export, or `interrupted` when
+it stopped early. Only `complete` covers every matching request; the status is
+printed, not stored.
 
 ## Review
 
-Once the advisor has written `decisions/` inside the anonymized copy, submit
+## Review
+
+Once the advisor has written proposals into the store, submit
 them in EduRec yourself with the program as a guide. Try `--dry-run` first: it
 walks the same queue with the action buttons disabled, so you can read the
-panels and check the pre-filled comments without submitting or logging anything.
+panels and check the pre-filled comments without submitting or storing anything.
 
 ```sh
-edurec-mappings review --run ../edurec-data/output/module-mappings --dry-run
-edurec-mappings review --run ../edurec-data/output/module-mappings
+edurec-mappings review --store ../edurec-data/module-mappings --dry-run
+edurec-mappings review --store ../edurec-data/module-mappings
 ```
 
-`--decisions` defaults to `<run>-anonymized/decisions`; `--request-id` and
-`--verdict` (repeatable) narrow the queue; the browser options are the same as
-for extraction. Decisions made from another export (their `source_started_at`
-differs from the inventory) or without a request file are reported and never
-offered.
+The queue is the latest version of every request that has a proposal for that
+version and no outcome for it, parts of a many-to-one mapping consecutively.
+`--request-id` and `--verdict` (repeatable) narrow it; the browser options are
+the same as for extraction. A malformed proposal file stops the review with an
+error naming it.
 
-For each queued request the program searches EduRec by the request's identity,
+For each queued request the program searches EduRec by the request's identity
+(the real student ID comes from `private/identities.yaml`),
 opens the detail, checks that it is still `Pending Approval` and still shows
 the exported courses, mapping number and sequence, pre-fills the comment box
-with the decision's comment on top of any existing comment (EduRec replaces
+with the proposal's comment on top of any existing comment (EduRec replaces
 the field, so the earlier text is kept below it), and injects a panel on the
 right. The panel is rendered in a shadow root so EduRec's styles cannot leak
 into it. From top to bottom it shows:
@@ -180,7 +205,8 @@ into it. From top to bottom it shows:
   amber from 40%, red below); under them the course (PU subject and number,
   university, NUS course, taken from the request), a thin progress bar and
   the caption `<position> of <total> this session · <submitted> of <requests>
-  overall`;
+  overall`, where `<submitted>` counts the requests whose latest version was
+  reviewed with a verdict and `<requests>` the requests in the store;
 - two tabs, **Recommended** and **Fallback**, each a bordered card. Clicking a
   tab only previews its pane. A selectable pane opens with **Decision:**
   and the verdict (the Recommended pane adds the confidence badge: green high,
@@ -199,8 +225,8 @@ into it. From top to bottom it shows:
 - the remap section (**Target:** and the analysis), when the advisor proposed one;
 - concerns, when there are any;
 - overlap, missing and extra topics as three lists, then every sibling part of
-  a many-to-one mapping by its course with its logged outcome, flagged when it
-  was submitted with a different action;
+  a many-to-one mapping by its course with the verdict submitted on its latest
+  version, flagged when it differs from this proposal's verdict;
 - pinned at the bottom, a **Skip** button with an optional reason field.
 
 You then edit the comment if you wish and press one of EduRec's own buttons,
@@ -210,8 +236,8 @@ is selected, the question offers to select the fallback and submit its comment.
 Cancel counts as a skip. The program never presses an action button. After
 your click it waits for the postback, re-reads the status and moves on. A
 request that no longer appears in the approval queue (Request Remapping and
-Request More Information remove it) is logged with status `not in approval
-queue` and counts as verified; if the status is still `Pending Approval` the
+Request More Information remove it) counts as verified with status `not in
+approval queue`; if the status is still `Pending Approval` the
 session stops rather than guessing. A comment that is empty or still contains
 `[` or `XXXX` is skipped without being entered.
 
@@ -221,23 +247,28 @@ panel and the click hook. The program notices, re-installs them with the
 comment box left as you had it, the same selected and viewed tabs, scroll
 position and skip reason,
 and keeps waiting; the dry-run buttons are disabled again too. If the detail page goes away without a recognised button
-(you navigated elsewhere), the request is logged as a skip with reason
+(you navigated elsewhere), the request is skipped with reason
 "reviewer left the page". A request that already left the queue before it was
-opened is logged as a skip and the session continues.
+opened is closed with an outcome (below) and the session continues.
 
-Only clicks made while the panel is shown are logged. When the session stops
+Only clicks made while the panel is shown are recorded. When the session stops
 on an error it closes the browser instead of leaving the page open, because a
 click on an unwatched page would go unrecorded; do not act in EduRec after the
 program has stopped.
 
-Every outcome is appended to `decisions/reviewed.yaml` before the next request
-opens: request id, the verdict recommended at the time, the action taken (a
-verdict or `skip`), the comment as submitted, timestamp, and a reason for skips
-or unverified submissions. A dry run writes nothing to the log. A skip reason typed into the panel is logged as
-`skipped by the reviewer: <reason>`. Requests logged with a verdict are never offered again, including
-unverified ones; skipped requests are offered on the next session. Parts of a
-many-to-one mapping are queued consecutively and the panel warns when a
-sibling was already submitted with a different action.
+Every outcome is printed. A submitted verdict is written to
+`outcomes/<request_id>/<hash>.yaml` before the next request opens: `action`
+(the verdict submitted), `comment` (as submitted), `recorded_at`, and a
+`reason` when the submission could not be verified.
+The file is written provisionally the moment the click is seen, so an error
+before verification still leaves the verdict on record. A request that already
+left the approval queue gets an outcome with action `not in approval queue`,
+which closes it. Other skips (a reason typed into the
+panel reads `skipped by the reviewer: <reason>`) and everything in a dry run
+write nothing, so those requests are offered again next session. A version with
+an outcome is never offered again; a later export that changes the request adds a
+new version, which needs a new proposal. The panel warns when a sibling was
+already submitted with a different action.
 
 ## Guarantees and limits
 
@@ -248,13 +279,14 @@ sibling was already submitted with a different action.
   information, prerequisites and comments are fetched through the browser
   session. PDFs are read with pypdf, HTML and text with BeautifulSoup, and
   Dropbox links use `dl=1`. Failures are recorded per URL and never abort a run.
-- A many-to-one request's `related_request_ids` lists only the siblings this
-  export collected; others may fall outside the current reassignee or term scope. The NUS syllabus is not
+- A many-to-one request's `related_request_ids` lists only the siblings the
+  same export collected; others may fall outside the current reassignee or term scope. The NUS syllabus is not
   exported because the detail page does not show it.
 - Scope is whatever the signed-in user can see in Course Mapping Approval, with
   no Mapping Status filter.
 - Identifiers and displayed numbers stay strings. Session tokens and raw HTML
-  are not exported. Exports contain personal data; keep `../edurec-data/` private.
+  are not exported. `private/` holds real student IDs and the key that protects
+  the pseudonyms; keep `../edurec-data/` private.
 
 ## Quality gate
 
@@ -267,13 +299,13 @@ ruff format . && ruff check --fix . && mypy && pytest
 The code, tests included, is fully type-annotated (ruff's `ANN` rules) and
 checked with `mypy --strict`. Records are
 dataclasses in `models.py`: the request records hold what a mapping decision
-needs, `Document` holds the extraction audit, and `Decision` mirrors
-one `decisions/<request_id>.yaml` file as `.claude/agents/course-mapping.md` specifies it. `plain`
-turns a record into the dictionary written to YAML (`Document.inventory()` is the
-export without its requests) and `hydrate` reads one back. Both go through a
+needs, `Export` holds one export in memory, `Proposal` mirrors one
+`proposals/<request_id>/<hash>.yaml` file as `.claude/agents/course-mapping.md`
+specifies it, and `Outcome` one outcome file. `plain` turns a record into the
+dictionary written to YAML and `hydrate` reads one back. Both go through a
 pydantic `TypeAdapter`; loading is strict, as for JSON: no type coercion, no
 unknown keys, and no YAML-only values such as unquoted timestamps. A malformed
-decision file stops the review with an error naming the file. Old data is
+proposal file stops the review with an error naming the file. Old data is
 migrated when the schema changes, not accepted by the loader.
 
 Tests parse the trimmed pages in `tests/fixtures/` and drive local headless

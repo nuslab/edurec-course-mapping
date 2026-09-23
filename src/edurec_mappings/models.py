@@ -1,4 +1,4 @@
-"""Typed records for the extraction run, the mapping requests it exports and the decisions on them.
+"""Typed records for an export, the mapping requests it stores and the proposals on them.
 
 Every record serialises to plain dictionaries and lists through `plain`, so the
 YAML output keeps the same key names as the model fields.
@@ -8,10 +8,9 @@ The records fall into three groups:
 - `Request` and its parts are what a course mapping decision needs: the partner
   and NUS course evidence, the student context, prior review comments, linked
   documents, and the identity that reopens the request in EduRec.
-- `Document` is the export itself: what was requested, the `SearchAudit` of every
-  search, whether it is complete, and the requests.
-- `Decision` is the AI course mapping advisor's verdict on one request, and
-  `Reviewed` records what the human reviewer then did with it in EduRec.
+- `Export` is one export in memory: how far it got and the requests it collected.
+- `Proposal` is the AI course mapping advisor's verdict on one request version, and
+  `Outcome` records what the human reviewer then did with it in EduRec.
 """
 
 from __future__ import annotations
@@ -19,27 +18,28 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields, replace
-from typing import Annotated, Any, Literal, NamedTuple, TypeVar, cast
+from typing import Annotated, Any, Final, Literal, NamedTuple, TypeVar, cast
 
 from pydantic import Field, TypeAdapter
 
 RangeField = Literal["term", "group", "sequence"]
 ExportStatus = Literal["in_progress", "complete", "row_limit_reached", "interrupted"]
-PartitionStatus = Literal["in_progress", "subdivided", "complete", "row_limit_reached"]
-"""`subdivided` means the search hit EduRec's row cap and was split into narrower ones."""
 FetchStatus = Literal["fetched", "empty", "too_large", "failed"]
 DocumentKind = Literal["pdf", "html", "text"]
 Verdict = Literal["approve", "reject", "request remapping", "request for more information"]
 Confidence = Literal["high", "medium", "low"]
-Action = Literal[Verdict, "skip"]
+Action = Literal[Verdict, "not in approval queue"]
+"""What a stored outcome records: the verdict submitted, or that the request left the queue."""
 Tab = Literal["recommended", "fallback"]
-"""The panel's comment tabs; the fallback exists only when the decision names one."""
+"""The panel's comment tabs; the fallback exists only when the proposal names one."""
 
+SCHEMA_VERSION = 7
+"""Version of the stored request files."""
 TERM_PATTERN = re.compile(r"\d{4}")
 """A four-digit EduRec term code, e.g. 2620."""
 PENDING = "Pending Approval"
-NOT_IN_QUEUE = "not in approval queue"
-"""The live status of a request that a submission removed from the approval queue."""
+NOT_IN_QUEUE: Final = "not in approval queue"
+"""The live status of a request that left the approval queue, and the outcome action for it."""
 
 
 GREEN, AMBER, RED = "#2e7d32", "#ef6c00", "#c62828"
@@ -188,7 +188,7 @@ class Listing:
 
 @dataclass
 class Identity:
-    """What identifies a request in EduRec; `request_id` is a digest of these seven values.
+    """What identifies a request in EduRec; `request_id` is a keyed digest of these seven values.
 
     Reopening a request searches by student ID, term code, mapping number and
     sequence; the other fields are context that EduRec shows on the detail page.
@@ -260,8 +260,8 @@ class NusCourse:
 class LinkedDocument:
     """A URL found in the course details and what could be read from it.
 
-    The extracted text is written to `path`, relative to the run directory, so
-    request files stay small; `text` is only held until the checkpoint writes it.
+    The extracted text is written to `path`, relative to the store, so request
+    files stay small; `text` is only held in memory until the store writes it.
     """
 
     url: str
@@ -275,15 +275,22 @@ class LinkedDocument:
     """Size of the extracted text, recorded even when it was too large to keep."""
     path: str | None = None
     text: Annotated[str | None, Field(exclude=True)] = None
-    """Held in memory only until the checkpoint writes it to `path`; never serialised."""
+    """Held in memory only until the store writes it to `path`; never serialised."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Request:
-    """A Course Mapping Approval request with everything a mapping decision needs."""
+    """A Course Mapping Approval request with everything a mapping decision needs.
 
-    request_id: str
-    """Digest of `identity`; stable across runs and unaffected by edits to the request."""
+    As parsed it carries the real student ID and no `request_id`; the store writes it
+    anonymized, with the keyed `request_id`, a pseudonym and `created_at`.
+    """
+
+    schema_version: int = SCHEMA_VERSION
+    created_at: str | None = None
+    """When the store first wrote this version of the request; None until then."""
+    request_id: str = ""
+    """Keyed digest of `identity`, stable across exports; empty until the store assigns it."""
     identity: Identity
     mapping_type: str | None
     student: Student
@@ -296,7 +303,7 @@ class Request:
     term_code: str | None = None
     """Four-digit EduRec term code from the results row; the STRM search key."""
     related_request_ids: list[str] = field(default_factory=list)
-    """Other requests in the same mapping group that this export collected."""
+    """Other requests in the same mapping group that the same export collected."""
     linked_documents: list[LinkedDocument] | None = None
     """Documents fetched from URLs in the course details; None until the scrape stage ran."""
 
@@ -310,65 +317,32 @@ class Request:
         )
 
 
-# --- Extraction audit --------------------------------------------------------------------
-
-
 @dataclass
-class SearchAudit:
-    criteria: Partition
-    reported_rows: int
-    status: PartitionStatus = "in_progress"
+class Export:
+    """One export in memory: how far the scan got and the unique requests it collected."""
 
-
-@dataclass(kw_only=True)
-class Document:
-    """The export: what was requested, how far the scan got, and the unique requests.
-
-    On disk a run is a directory: `inventory.yaml` holds everything but the
-    requests, which are written one file each under `requests/`, and scraped
-    document text goes under `documents/`.
-    """
-
-    schema_version: int = 5
-    started_at: str
     status: ExportStatus = "in_progress"
     error: str | None = None
-    anonymized: bool = False
-    """True only in the anonymized copy, where student identity is replaced by pseudonyms."""
-    reassign_id: str | None = None
-    """The requested scope; None means no restriction on that criterion."""
-    terms: list[str] | None = None
-    row_limit: int | None = None
-    search_partitions: list[SearchAudit] = field(default_factory=list)
-    duplicate_details: int = 0
     requests: list[Request] = field(default_factory=list)
 
-    def inventory(self) -> dict[str, object]:
-        """The `inventory.yaml` content: the export without the request records."""
-        return plain(self, exclude={"requests"})
 
-
-# --- Decision ----------------------------------------------------------------------------
+# --- Proposal ----------------------------------------------------------------------------
 
 
 @dataclass
-class Decision:
-    """`decisions/<request_id>.yaml`: the AI course mapping advisor's verdict on one request.
+class Proposal:
+    """`proposals/<request_id>/<hash>.yaml`: the advisor's verdict on one request version.
 
-    Each file names the export it was made from, so the approval script can
-    detect a decision made on an older export than the one it is applying.
-    See .claude/agents/course-mapping.md.
+    The path is the key: it names the request version the proposal was made from, so
+    a changed request is a new version without a proposal. See
+    .claude/agents/course-mapping.md.
     """
 
-    source_started_at: str
-    """`started_at` of the export the decision was made from."""
-    request_id: str
-    """The only key used to link the decision back to the export and to EduRec."""
     verdict: Verdict
     comment: str
     """The complete text to enter in EduRec, following the verdict's template."""
     overlap_percentage: int
-    decision_confidence: Confidence
+    confidence: Confidence
     overlap: list[str] = field(default_factory=list)
     missing_from_pu: list[str] = field(default_factory=list)
     extra_in_pu: list[str] = field(default_factory=list)
@@ -402,25 +376,22 @@ def stack(comment: str, existing: str | None) -> str:
 
 
 @dataclass
-class Reviewed:
-    """`decisions/reviewed.yaml` entry: the outcome of showing one decision to the reviewer.
+class Outcome:
+    """The outcome of showing one proposal to the reviewer.
 
-    `action` is the EduRec button the reviewer pressed, or `skip` when the request
-    was passed over (by the reviewer or by a freshness check); `reason` says why,
-    or why a submission could not be verified. A non-skip entry is never offered
-    again. Dry runs are not logged.
+    Stored as `outcomes/<request_id>/<hash>.yaml`, keyed by its path. `action` is the
+    verdict the reviewer submitted, or `not in approval queue` when the request left
+    the queue before it was opened; `reason` says why a submission could not be
+    verified. A request passed over is a `Skipped` reaction and never stored.
     """
 
-    request_id: str
-    verdict_recommended: Verdict
-    """The decision's verdict when it was shown; the decision file may be redone later."""
     action: Action
-    comment_submitted: str | None
-    reviewed_at: str
+    comment: str | None
+    recorded_at: str
     reason: str | None = None
 
 
-# --- Reviewer outcomes ---------------------------------------------------------------------
+# --- Reviewer reactions --------------------------------------------------------------------
 
 
 class Clicked(NamedTuple):
@@ -438,7 +409,7 @@ class Skipped(NamedTuple):
     reason: str
 
 
-Outcome = Clicked | Skipped
+Reaction = Clicked | Skipped
 
 
 class Fetched(NamedTuple):

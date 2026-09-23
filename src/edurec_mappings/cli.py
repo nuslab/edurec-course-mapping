@@ -1,10 +1,10 @@
-"""Extract EduRec course mapping approval requests and walk the reviewer through decisions.
+"""Extract EduRec course mapping approval requests and walk the reviewer through proposals.
 
-`export` runs stages 1-3: 1. extract requests from EduRec (read-only navigation);
-2. with --scrape-urls, fetch the URLs in the course details and store their text;
-3. with --anonymize, write a pseudonymised copy. `review` is stage 4: walk the reviewer
-through the decisions in EduRec. `fetch URL` prints the text of one page after its
-scripts have run, for links the export could not read.
+`export` extracts requests from EduRec (read-only navigation), with --scrape-urls
+fetches the URLs in their course details, and adds anonymized request versions to
+the store. `pending` lists the request versions still awaiting a proposal. `review`
+walks the reviewer through the proposals in EduRec. `fetch URL` prints the text of
+one page after its scripts have run, for links the export could not read.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ import yaml
 from playwright.sync_api import BrowserContext, Dialog, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
-from .anonymize import anonymize, anonymized_path
 from .browser import (
     APPROVAL_FORM,
     COMPONENT,
@@ -32,13 +31,13 @@ from .browser import (
     mapping_frame,
 )
 from .documents import html_text, playwright_fetcher, playwright_renderer, scrape
-from .export import checkpoint, export
-from .models import TERM_PATTERN, Verdict
+from .export import export
+from .models import TERM_PATTERN, Export, Verdict
 from .review import review
-from .store import reset, save
+from .store import Store
 
 LOGIN_PROMPT = (
-    "Log in and accept the policy if you agree. Collection starts automatically once "
+    "Log in and accept the policy if you agree. The program continues automatically once "
     "the Course Mapping Approval form is visible; press Enter to retry immediately: "
 )
 POLL_SECONDS = 3.0
@@ -48,7 +47,6 @@ REVIEW_NOTICE = (
     "do not act in EduRec after it stops."
 )
 VERDICTS: tuple[Verdict, ...] = get_args(Verdict)
-DEFAULT_RUN = "../edurec-data/output/module-mappings"
 
 
 def optional_rows(value: str) -> int | None:
@@ -89,7 +87,9 @@ def configured_terms(path: str | Path) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="edurec-mappings", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
-    browser = argparse.ArgumentParser(add_help=False)
+    store = argparse.ArgumentParser(add_help=False)
+    store.add_argument("--store", required=True, help="The append-only request store")
+    browser = argparse.ArgumentParser(add_help=False, parents=[store])
     add = browser.add_argument
     add("--cdp-url", help="Attach to the existing exploration browser")
     add("--profile", default="../edurec-data/browser-profile")
@@ -100,8 +100,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     export_parser = commands.add_parser(
         "export",
         parents=[browser],
-        help="Extract the approval requests into a run directory",
-        description="Extract the approval requests into a run directory (read-only navigation)",
+        help="Extract the approval requests into the store",
+        description="Extract the approval requests into the store (read-only navigation)",
     )
     add = export_parser.add_argument
     add("--reassign-id", default="", help="Exact ReassignID; blank = all")
@@ -112,24 +112,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="YAML configuration listing terms to search when Term is blank",
     )
     add("--rows", type=optional_rows, help="Unique matching requests; blank = all")
-    add(
-        "--run",
-        default=DEFAULT_RUN,
-        help="Run directory: inventory.yaml, requests/ and documents/; also the checkpoint",
-    )
     add("--scrape-urls", action="store_true", help="Fetch URLs in course details into documents/")
-    add("--anonymize", action="store_true", help="Also write an anonymized copy of the run")
-    add("--anonymized-run", help="Directory of the anonymized copy; default <run>-anonymized")
+
+    commands.add_parser(
+        "pending",
+        parents=[store],
+        help="List the request versions awaiting a proposal",
+        description="Print requests/<request_id>/<hash>.yaml, relative to the store, for the "
+        "latest version of every request without a proposal; sibling parts are consecutive",
+    )
 
     review_parser = commands.add_parser(
         "review",
         parents=[browser],
-        help="Walk the reviewer through the advisor's decisions",
-        description="Walk the reviewer through the advisor's decisions on their EduRec pages",
+        help="Walk the reviewer through the advisor's proposals",
+        description="Walk the reviewer through the advisor's proposals on their EduRec pages",
     )
     add = review_parser.add_argument
-    add("--run", default=DEFAULT_RUN, help="The original export")
-    add("--decisions", help="Decision files; default <run>-anonymized/decisions")
     add("--request-id", dest="request_ids", action="append", default=[], help="Only these")
     add("--verdict", dest="verdicts", action="append", default=[], choices=VERDICTS)
     add("--dry-run", action="store_true", help="Disable the action buttons; only Skip advances")
@@ -146,19 +145,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--settle", type=float, default=8, help="Seconds to wait after network idle")
 
     args = parser.parse_args(argv)
-    args.timeout_ms = args.timeout * 1000  # Playwright expects milliseconds.
+    if "timeout" in args:
+        args.timeout_ms = args.timeout * 1000  # Playwright expects milliseconds.
     if args.command == "export":
         try:
             # An explicit term overrides the configured list.
             args.terms = [args.term] if args.term else configured_terms(args.terms_file)
         except (OSError, ValueError, argparse.ArgumentTypeError, yaml.YAMLError) as error:
             export_parser.error(str(error))
-        args.anonymized_run = args.anonymized_run or str(anonymized_path(args.run))
-        if Path(args.anonymized_run).resolve() == Path(args.run).resolve():
-            export_parser.error("The anonymized copy must use a different path from --run")
-    elif args.command == "review":
-        args.decisions = args.decisions or str(anonymized_path(args.run) / "decisions")
     return args
+
+
+def run_pending(args: argparse.Namespace) -> None:
+    for version in Store(args.store).pending():
+        print(version.path())
 
 
 def run_fetch(args: argparse.Namespace) -> None:
@@ -277,7 +277,7 @@ def await_approval(context: BrowserContext, args: argparse.Namespace) -> None:
     print(LOGIN_PROMPT, end="", flush=True)
     while True:
         if approval_ready(context):
-            print("\nCourse Mapping Approval detected; starting collection.", flush=True)
+            print("\nCourse Mapping Approval detected.", flush=True)
             return
         if not wait_for_enter(POLL_SECONDS):
             continue
@@ -286,9 +286,7 @@ def await_approval(context: BrowserContext, args: argparse.Namespace) -> None:
             return
         except (RuntimeError, PlaywrightError) as error:
             print(f"Not ready: {str(error).splitlines()[0]}")
-            print(
-                "Browser remains open. Finish signing in; collection starts when the form appears."
-            )
+            print("Browser remains open. Finish signing in; this continues when the form appears.")
             print(LOGIN_PROMPT, end="", flush=True)
 
 
@@ -317,39 +315,43 @@ def hold_open(args: argparse.Namespace, message: str) -> None:
         input("Browser remains open for inspection. Press Enter to close: ")
 
 
+def collect(context: BrowserContext, args: argparse.Namespace, data: Export) -> None:
+    """Extract the matching requests into `data` and, with --scrape-urls, their documents."""
+    connect(context, args)
+    context.remove_listener("dialog", manual_dialog)
+    site = EduRec(context, args.timeout_ms)
+    export(site, data, reassign_id=args.reassign_id.strip(), rows=args.rows, terms=args.terms)
+    print(f"{data.status}: {len(data.requests)} requests collected", flush=True)
+    if args.scrape_urls:
+        fetch = playwright_fetcher(context, args.timeout_ms)
+        scrape(data.requests, fetch, playwright_renderer(context, args.timeout_ms))
+
+
+def persist(data: Export, args: argparse.Namespace) -> None:
+    """Store every collected request that is complete: with --scrape-urls, once scraped."""
+    ready = [r for r in data.requests if not args.scrape_urls or r.linked_documents is not None]
+    added = Store(args.store).save(ready)
+    print(f"{len(ready)} requests stored, {len(added)} new versions → {args.store}", flush=True)
+
+
 def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
+    """Collect, then store what was collected even when collection stopped early."""
     context.on("dialog", manual_dialog)
+    data = Export()
     try:
-        connect(context, args)
-        context.remove_listener("dialog", manual_dialog)
-        site = EduRec(context, args.timeout_ms)
-        result = export(
-            site,
-            args.run,
-            reassign_id=args.reassign_id.strip(),
-            rows=args.rows,
-            terms=args.terms,
-        )
-        status, count = result.status, len(result.requests)
-        print(f"{status}: {count} requests → {args.run}")
-        if args.scrape_urls:
-            fetch = playwright_fetcher(context, args.timeout_ms)
-            render = playwright_renderer(context, args.timeout_ms)
-            scrape(result, fetch, checkpoint(result, args.run), render)
-            print(f"Linked documents added → {args.run}")
-        if args.anonymize:
-            reset(args.anonymized_run)
-            save(anonymize(result), args.anonymized_run)
-            print(f"Anonymized copy → {args.anonymized_run}")
+        try:
+            collect(context, args, data)
+        finally:
+            persist(data, args)
     except Exception as error:
-        hold_open(args, f"Collection stopped: {error}. Checkpoint retained.")
+        hold_open(args, f"Collection stopped: {error}.")
         raise
     finally:
         context.remove_listener("dialog", manual_dialog)
 
 
 def run_review(context: BrowserContext, args: argparse.Namespace) -> None:
-    """Walk the decisions; on error the browser is closed at once, never held open.
+    """Walk the proposals; on error the browser is closed at once, never held open.
 
     An unwatched detail page would let the reviewer act without anything being logged.
     """
@@ -360,14 +362,13 @@ def run_review(context: BrowserContext, args: argparse.Namespace) -> None:
         connect(context, args)
         review(
             Reviewer(context, args.timeout_ms),
-            args.run,
-            args.decisions,
+            args.store,
             request_ids=args.request_ids,
             verdicts=args.verdicts,
             dry_run=args.dry_run,
         )
     except Exception as error:
-        print(f"Review stopped: {error}. Log retained.", flush=True)
+        print(f"Review stopped: {error}. Stored outcomes retained.", flush=True)
         raise
     finally:
         context.remove_listener("dialog", manual_dialog)
@@ -377,6 +378,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     if args.command == "fetch":
         run_fetch(args)
+        return
+    if args.command == "pending":
+        run_pending(args)
         return
     with browser_context(args) as context:
         (run_export if args.command == "export" else run_review)(context, args)

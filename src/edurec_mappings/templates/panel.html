@@ -40,11 +40,11 @@
 </style>
 <header>
 <div class="badges">
-{{- pill(decision.verdict | display, verdict_colours[decision.verdict], "recommended") }}
-{%- if decision.fallback_verdict %}
-{{- pill(decision.fallback_verdict | display, verdict_colours[decision.fallback_verdict], "fallback", active=false) }}
+{{- pill(proposal.verdict | display, verdict_colours[proposal.verdict], "recommended") }}
+{%- if proposal.fallback_verdict %}
+{{- pill(proposal.fallback_verdict | display, verdict_colours[proposal.fallback_verdict], "fallback", active=false) }}
 {%- endif %}
-{{- pill(decision.overlap_percentage ~ "% Overlap", overlap_colour) -}}
+{{- pill(proposal.overlap_percentage ~ "% Overlap", overlap_colour) -}}
 </div>
 <div class="course">{{ request.course }}</div>
 <div class="bar"><span style="width:{{ done }}%"></span></div>
@@ -54,35 +54,35 @@
 </header>
 <div id="body">
 <nav class="tabs"><button type="button" class="tab active" data-tab="recommended">Recommended</button><button type="button" class="tab" data-tab="fallback">Fallback</button></nav>
-{{ pane("recommended", decision.verdict | display, decision.comment,
-        badge=pill((decision.decision_confidence | display) ~ " Confidence",
-                   confidence_colours[decision.decision_confidence])) }}
-{{ pane("fallback", decision.fallback_verdict | display if decision.fallback_verdict else none,
-        decision.fallback_comment or "", decision.fallback_rationale or "") }}
+{{ pane("recommended", proposal.verdict | display, proposal.comment,
+        badge=pill((proposal.confidence | display) ~ " Confidence",
+                   confidence_colours[proposal.confidence])) }}
+{{ pane("fallback", proposal.fallback_verdict | display if proposal.fallback_verdict else none,
+        proposal.fallback_comment or "", proposal.fallback_rationale or "") }}
 {%- if existing %}
 {{ label("Previous comments") }}
 <div class="comment">{{ existing }}</div>
 {%- endif %}
-{%- if decision.remap_target or decision.remap_analysis %}
+{%- if proposal.remap_target or proposal.remap_analysis %}
 {{ label("Remap") }}
-{%- if decision.remap_target %}
-<p><b>Target:</b> {{ decision.remap_target }}</p>
+{%- if proposal.remap_target %}
+<p><b>Target:</b> {{ proposal.remap_target }}</p>
 {%- endif %}
-{%- if decision.remap_analysis %}
-<p>{{ decision.remap_analysis }}</p>
+{%- if proposal.remap_analysis %}
+<p>{{ proposal.remap_analysis }}</p>
 {%- endif %}
 {%- endif %}
-{{- bullets("Concerns", decision.concerns) }}
-{{- bullets("Overlap", decision.overlap) }}
-{{- bullets("Missing from PU", decision.missing_from_pu) }}
-{{- bullets("Extra in PU", decision.extra_in_pu) }}
+{{- bullets("Concerns", proposal.concerns) }}
+{{- bullets("Overlap", proposal.overlap) }}
+{{- bullets("Missing from PU", proposal.missing_from_pu) }}
+{{- bullets("Extra in PU", proposal.extra_in_pu) }}
 {%- if request.related_request_ids %}
 {{ label("Siblings (many-to-one)") }}
 <ul>
 {%- for sibling in request.related_request_ids %}
 {%- set logged = latest.get(sibling) %}
 <li>{{ courses.get(sibling, sibling) }}: {{ logged.action if logged else "not yet submitted" }}
-{%- if logged and logged.action != decision.verdict %} {{ warn("different action") }}{% endif %}</li>
+{%- if logged and logged.action != proposal.verdict %} {{ warn("different action") }}{% endif %}</li>
 {%- endfor %}
 </ul>
 {%- endif %}

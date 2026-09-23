@@ -5,9 +5,10 @@ from pathlib import Path
 import yaml
 from bs4 import BeautifulSoup, Tag
 
+from edurec_mappings.anonymize import request_id
 from edurec_mappings.models import LIST_COLUMNS, plain
 from edurec_mappings.parse import GRID, detail, listing
-from edurec_mappings.store import document, reset, save
+from edurec_mappings.store import Store
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -57,7 +58,7 @@ class ExtractionTests(unittest.TestCase):
         tag(soup, "N_EXSP_MOD_DT_TRNSFR_EQVLNCY_SEQ$0").string = "2"
         second = detail(soup)
         self.assertEqual(first.identity.mapping, second.identity.mapping)
-        self.assertNotEqual(first.request_id, second.request_id)
+        self.assertNotEqual(request_id(b"k", first.identity), request_id(b"k", second.identity))
         tag(soup, "N_EXSP_WKST_HDR_EMPLID").string = "TEST_STUDENT_B"
         third = detail(soup)
         self.assertNotEqual(first.identity.mapping, third.identity.mapping)
@@ -68,7 +69,7 @@ class ExtractionTests(unittest.TestCase):
         tag(soup, "N_EXSP_MOD_DT_N_MOD_COMMENTS$0").string = "Reviewer added a comment"
         tag(soup, "N_EXSP_MOD_DT_N_URL$0").string = "https://example.org/new-syllabus"
         second = detail(soup)
-        self.assertEqual(first.request_id, second.request_id)
+        self.assertEqual(request_id(b"k", first.identity), request_id(b"k", second.identity))
 
     def test_missing_identity_is_rejected(self) -> None:
         soup = fixture("individual.html")
@@ -76,21 +77,14 @@ class ExtractionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "student ID"):
             detail(soup)
 
-    def test_run_directory_layout_and_no_session_tokens(self) -> None:
-        data = document()
-        data.requests.append(detail(fixture("individual.html")))
+    def test_stored_request_has_no_session_tokens(self) -> None:
+        request = detail(fixture("individual.html"))
         with tempfile.TemporaryDirectory() as directory:
-            run = Path(directory) / "run"
-            save(data, run)
-            inventory = yaml.safe_load((run / "inventory.yaml").read_text())
-            self.assertEqual(inventory, data.inventory())
-            self.assertNotIn("requests", inventory, "Requests live in one file each")
-            self.assertEqual(inventory["schema_version"], 5)
-            (path,) = (run / "requests").iterdir()
-            self.assertEqual(path.name, f"{data.requests[0].request_id}.yaml")
-            content = path.read_text()
+            store = Store(Path(directory) / "store")
+            (version,) = store.save([request])
+            content = (store.root / version.path()).read_text()
             result = yaml.safe_load(content)
-            self.assertEqual(result, plain(data.requests[0]))
+            self.assertEqual(result, plain(version.request))
             self.assertNotIn("ICSID", content)
             self.assertNotIn("&id", content, "Records must not be emitted as YAML aliases")
             self.assertEqual(result["related_request_ids"], [])
@@ -99,18 +93,6 @@ class ExtractionTests(unittest.TestCase):
                 result["partner_course"]["assessments"][0].keys(),
                 {"method", "weight_percent", "remark"},
             )
-
-    def test_reset_clears_a_previous_run_only(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            run = Path(directory) / "run"
-            (run / "requests").mkdir(parents=True)
-            (run / "requests" / "stale.yaml").write_text("old")
-            (run / "documents").mkdir()
-            (run / "inventory.yaml").write_text("old")
-            (run / "decisions").mkdir()
-            reset(run)
-            self.assertEqual({p.name for p in run.iterdir()}, {"decisions"})
-            reset(run / "missing")
 
     def test_wrong_page_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
