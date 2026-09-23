@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -199,17 +200,45 @@ def comment_source(
     return next((t for t in candidates if prefills[t].strip() == text), "edited")
 
 
+def since_export(log: Iterable[Applied], started: str | None) -> list[Applied]:
+    """The log entries made after the export started.
+
+    A request id survives resubmission: a request applied before the export was
+    taken and exported again as pending is a new round, so its earlier entries
+    do not count against it. Entries whose timestamp cannot be read are kept.
+    """
+    if started is None:
+        return list(log)
+    try:
+        cutoff = datetime.fromisoformat(started)
+    except ValueError:
+        return list(log)
+    kept: list[Applied] = []
+    for entry in log:
+        try:
+            if datetime.fromisoformat(entry.applied_at) < cutoff:
+                continue
+        except ValueError:
+            pass
+        kept.append(entry)
+    return kept
+
+
 def select(
     queue: Iterable[Item],
     log: Iterable[Applied],
     request_ids: Iterable[str] = (),
     verdicts: Iterable[str] = (),
+    started: str | None = None,
 ) -> list[Item]:
     """Drop requests already applied and apply the CLI filters.
 
     Skips are offered again, except a request that left the approval queue:
-    it cannot come back, so its skip is final.
+    it cannot come back, so its skip is final. Only entries made since the
+    export started (`started`, the collection's `started_at`) count: a request
+    resubmitted after an earlier round keeps its id and is offered again.
     """
+    log = since_export(log, started)
     done = {entry.request_id for entry in log if entry.action != "skip" or entry.reason == VANISHED}
     ids, wanted = set(request_ids), set(verdicts)
     return [
@@ -487,12 +516,15 @@ def apply(
         print(f"Not applicable {request_id}: {why}", flush=True)
     log_path = decisions / APPLIED
     log = load_applied(log_path)
+    started = started_at(decisions.parent)
     vanished = {
-        entry.request_id for entry in log if entry.action == "skip" and entry.reason == VANISHED
+        entry.request_id
+        for entry in since_export(log, started)
+        if entry.action == "skip" and entry.reason == VANISHED
     }
     for request_id in sorted(vanished):
         print(f"Not applicable {request_id}: {VANISHED}", flush=True)
-    queue = select(queue, log, request_ids, verdicts)
+    queue = select(queue, log, request_ids, verdicts, started)
     courses = course_names(decisions)
     requests = sum(1 for _ in (run / REQUESTS).glob("*.yaml"))
     session: list[Applied] = []

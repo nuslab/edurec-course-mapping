@@ -231,6 +231,59 @@ class ApplyTests(unittest.TestCase):
                 [i.request.request_id for i in select(queue, [], request_ids=[ids[2]])], [ids[2]]
             )
 
+    def test_entries_from_before_the_export_do_not_block_a_resubmission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, decisions, requests = make_run(directory)
+            queue, _ = load_queue(run, decisions)
+            earlier = "2000-01-01T00:00:00+00:00"
+            log = [
+                Applied(
+                    request_id=requests[0].request_id,
+                    verdict_recommended="request remapping",
+                    action="request remapping",
+                    comment_submitted="x",
+                    comment_edited=False,
+                    status_before=PENDING,
+                    status_after="not in approval queue",
+                    applied_at=earlier,
+                    dry_run=False,
+                ),
+                Applied(
+                    request_id=requests[1].request_id,
+                    verdict_recommended="approve",
+                    action="skip",
+                    comment_submitted=None,
+                    comment_edited=False,
+                    status_before=PENDING,
+                    status_after=None,
+                    applied_at=earlier,
+                    dry_run=False,
+                    reason=VANISHED,
+                ),
+                Applied(
+                    request_id=requests[2].request_id,
+                    verdict_recommended="approve",
+                    action="approve",
+                    comment_submitted="x",
+                    comment_edited=False,
+                    status_before=PENDING,
+                    status_after="Approved",
+                    applied_at=STARTED,
+                    dry_run=False,
+                ),
+            ]
+            remaining = {item.request.request_id for item in select(queue, log, started=STARTED)}
+            self.assertEqual(
+                remaining,
+                {r.request_id for r in requests if r is not requests[2]},
+                "Entries older than the export are a previous round; only entries since count",
+            )
+            self.assertEqual(
+                {item.request.request_id for item in select(queue, log)},
+                {requests[3].request_id},
+                "Without an export start, every entry counts as before",
+            )
+
     def test_applied_log_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / APPLIED
