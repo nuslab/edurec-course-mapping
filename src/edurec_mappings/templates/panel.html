@@ -1,0 +1,90 @@
+{#- The reviewer's panel; `page.js` renders it into a shadow root. Every value is
+    autoescaped. Inline runs stay on one line: a newline between inline elements
+    would render as a space. -#}
+{%- macro pill(text, colour, tab=none, active=true) -%}
+<span class="pill{% if tab and active %} active{% endif %}"{% if tab %} data-tab="{{ tab }}"{% endif %} style="background:{{ colour }}">{{ text }}</span>
+{%- endmacro -%}
+{%- macro warn(text) %}<span class="warn">{{ text }}</span>{% endmacro -%}
+{%- macro label(text) %}<div class="label">{{ text }}</div>{% endmacro -%}
+{%- macro bullets(title, values) -%}
+{%- if values %}
+{{ label(title) }}
+<ul>{% for value in values %}<li>{{ value }}</li>{% endfor %}</ul>
+{%- endif -%}
+{%- endmacro -%}
+{#- One tab's content: the Decision line, an optional badge and note, the comment and
+    its tools. Recommended is shown and selected initially; a pane without a verdict
+    (a fallback with none) reads "No fallback" and cannot be selected. -#}
+{%- macro pane(tab, verdict, comment, note="", badge="") -%}
+{%- set first = tab == "recommended" %}
+<section class="pane{% if first %} active selected{% endif %}" data-tab="{{ tab }}">
+{%- if verdict %}
+<p><b>Decision:</b> {{ verdict }}</p>
+{%- else %}
+<p>No fallback</p>
+{%- endif %}
+{%- if badge %}
+<p>{{ badge }}</p>
+{%- endif %}
+{%- if note %}
+<p>{{ note }}</p>
+{%- endif %}
+{%- if verdict %}
+<div class="comment">{{ comment }}</div>
+<p class="tools"><button type="button" class="reset">Reset comment</button><button type="button" class="select"{% if first %} disabled{% endif %}>{{ "Selected" if first else "Select" }}</button><span class="modified" hidden>modified</span></p>
+{%- endif %}
+</section>
+{%- endmacro -%}
+<style>
+{% include "panel.css" %}
+</style>
+<header>
+<div class="badges">
+{{- pill(decision.verdict | display, verdict_colours[decision.verdict], "recommended") }}
+{%- if decision.fallback_verdict %}
+{{- pill(decision.fallback_verdict | display, verdict_colours[decision.fallback_verdict], "fallback", active=false) }}
+{%- endif %}
+{{- pill(decision.overlap_percentage ~ "% Overlap", overlap_colour) -}}
+</div>
+<div class="course">{{ decision.course }}</div>
+<div class="bar"><span style="width:{{ done }}%"></span></div>
+<div class="progress"><span>{{ progress.position }} of {{ progress.total }} this session &middot; {{ progress.submitted }} of {{ progress.requests }} overall</span>
+{%- if dry_run %}{{ warn("Dry run: action buttons disabled, only Skip advances") }}{% endif -%}
+</div>
+</header>
+<div id="body">
+<nav class="tabs"><button type="button" class="tab active" data-tab="recommended">Recommended</button><button type="button" class="tab" data-tab="fallback">Fallback</button></nav>
+{{ pane("recommended", decision.verdict | display, decision.comment,
+        badge=pill((decision.decision_confidence | display) ~ " Confidence",
+                   confidence_colours[decision.decision_confidence])) }}
+{{ pane("fallback", decision.fallback_verdict | display if decision.fallback_verdict else none,
+        decision.fallback_comment or "", decision.fallback_rationale or "") }}
+{%- if existing %}
+{{ label("Previous comments") }}
+<div class="comment">{{ existing }}</div>
+{%- endif %}
+{%- if decision.remap_target or decision.remap_analysis %}
+{{ label("Remap") }}
+{%- if decision.remap_target %}
+<p><b>Target:</b> {{ decision.remap_target }}</p>
+{%- endif %}
+{%- if decision.remap_analysis %}
+<p>{{ decision.remap_analysis }}</p>
+{%- endif %}
+{%- endif %}
+{{- bullets("Concerns", decision.concerns) }}
+{{- bullets("Overlap", decision.overlap) }}
+{{- bullets("Missing from PU", decision.missing_from_pu) }}
+{{- bullets("Extra in PU", decision.extra_in_pu) }}
+{%- if request.related_request_ids %}
+{{ label("Siblings (many-to-one)") }}
+<ul>
+{%- for sibling in request.related_request_ids %}
+{%- set logged = latest.get(sibling) %}
+<li>{{ courses.get(sibling, sibling) }}: {{ logged.action if logged else "not yet submitted" }}
+{%- if logged and logged.action != decision.verdict %} {{ warn("different action") }}{% endif %}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+</div>
+<footer><input type="text" id="reason" placeholder="Skip reason (optional)"><button type="button" id="skip">Skip this request</button></footer>

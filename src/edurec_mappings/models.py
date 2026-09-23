@@ -16,20 +16,12 @@ The records fall into three groups:
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass, field, fields, is_dataclass, replace
-from types import UnionType
-from typing import (
-    Any,
-    Literal,
-    NamedTuple,
-    TypeVar,
-    Union,
-    cast,
-    get_args,
-    get_origin,
-    get_type_hints,
-)
+from dataclasses import dataclass, field, fields, replace
+from typing import Annotated, Any, Literal, NamedTuple, TypeVar, cast
+
+from pydantic import Field, TypeAdapter
 
 RangeField = Literal["term", "group", "sequence"]
 CollectionStatus = Literal["in_progress", "complete", "row_limit_reached", "interrupted"]
@@ -68,50 +60,40 @@ def display(value: str) -> str:
     return value.title()
 
 
-def plain(value: object) -> object:
-    """Convert records to dictionaries and lists that YAML writers accept.
-
-    Fields marked `transient` are held in memory only and never serialised.
-    """
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            f.name: plain(getattr(value, f.name))
-            for f in fields(value)
-            if not f.metadata.get("transient")
-        }
-    if isinstance(value, dict):
-        return {str(key): plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [plain(item) for item in value]
-    return value
-
-
-def as_dict(value: object) -> dict[str, object]:
-    return cast("dict[str, object]", plain(value))
-
-
 T = TypeVar("T")
+ADAPTERS: dict[type, TypeAdapter[Any]] = {}
+"""One adapter per record type; `Any` because the dict holds every type's adapter."""
+
+
+def adapter(kind: type[T]) -> TypeAdapter[T]:
+    """The validator and serialiser for a record type, built once: building takes milliseconds."""
+    if kind not in ADAPTERS:
+        ADAPTERS[kind] = TypeAdapter(kind)
+    return ADAPTERS[kind]
+
+
+def plain(record: object, exclude: set[str] | None = None) -> dict[str, object]:
+    """A record as the JSON-compatible dictionary that YAML writers accept.
+
+    The record's own type drives serialisation, so `Field(exclude=True)` fields are
+    dropped; convert a list of records item by item, since an untyped list keeps them.
+    """
+    data = adapter(type(record)).dump_python(record, mode="json", exclude=exclude)
+    return cast("dict[str, object]", data)
 
 
 def hydrate(cls: type[T], data: object) -> T:
-    """Rebuild a record from its `plain` form: nested records, lists of them, `X | None`."""
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected a mapping for {cls.__name__}, got {type(data).__name__}")
-    hints = get_type_hints(cls)
-    names = [f.name for f in fields(cast(Any, cls)) if f.name in data]
-    return cls(**{name: value_of(hints[name], data[name]) for name in names})
+    """Rebuild a record from its `plain` form, as strictly as JSON: no coercion, no unknown keys.
 
-
-def value_of(hint: object, value: object) -> object:
-    origin = get_origin(hint)
-    if origin in (Union, UnionType):
-        members = [member for member in get_args(hint) if member is not type(None)]
-        return None if value is None else value_of(members[0], value)
-    if origin is list and isinstance(value, list):
-        return [value_of(get_args(hint)[0], item) for item in value]
-    if isinstance(hint, type) and is_dataclass(hint):
-        return hydrate(hint, value)
-    return value
+    Validation runs in JSON mode because strict Python mode accepts only instances
+    of a dataclass, never a mapping. Raises `ValueError` (`pydantic.ValidationError`
+    is one) for invalid content or a YAML value JSON cannot hold, such as a date.
+    """
+    try:
+        payload = json.dumps(data)
+    except TypeError as error:
+        raise ValueError(f"{cls.__name__} is not JSON-compatible: {error}") from error
+    return adapter(cls).validate_json(payload, strict=True, extra="forbid")
 
 
 # --- Search and results grid -------------------------------------------------------------
@@ -291,7 +273,8 @@ class LinkedDocument:
     bytes: int | None = None
     """Size of the extracted text, recorded even when it was too large to keep."""
     path: str | None = None
-    text: str | None = field(default=None, metadata={"transient": True})
+    text: Annotated[str | None, Field(exclude=True)] = None
+    """Held in memory only until the checkpoint writes it to `path`; never serialised."""
 
 
 @dataclass
@@ -323,9 +306,6 @@ class Request:
     @property
     def many_to_one(self) -> bool:
         return self.mapping_type == MANY_TO_ONE
-
-    def to_dict(self) -> dict[str, object]:
-        return as_dict(self)
 
 
 # --- Extraction audit --------------------------------------------------------------------
@@ -410,12 +390,9 @@ class Document:
     requests: list[Request] = field(default_factory=list)
     mapping_groups: list[MappingGroup] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, object]:
-        return as_dict(self)
-
     def inventory(self) -> dict[str, object]:
         """The `inventory.yaml` content: the export without the request records."""
-        return {key: value for key, value in self.to_dict().items() if key != "requests"}
+        return plain(self, exclude={"requests"})
 
 
 # --- Decision ----------------------------------------------------------------------------
@@ -457,14 +434,13 @@ class Decision:
     fallback_rationale: str | None = None
     """Why the fallback is defensible, or why no alternative is (when the verdict is null)."""
 
-    def prefill(self, existing: str | None) -> str:
-        """The comment box content: EduRec replaces the field, so the decision's
-        comment goes on top and any existing text is kept below it."""
-        return stack(self.comment, existing)
-
     def prefills(self, existing: str | None) -> dict[Tab, str]:
-        """The comment box content per panel tab; the fallback only when there is one."""
-        result: dict[Tab, str] = {"recommended": self.prefill(existing)}
+        """The comment box content per panel tab; the fallback only when there is one.
+
+        EduRec replaces the field, so the tab's comment goes on top and any
+        existing text is kept below it.
+        """
+        result: dict[Tab, str] = {"recommended": stack(self.comment, existing)}
         if self.fallback_verdict:
             result["fallback"] = stack(self.fallback_comment or "", existing)
         return result

@@ -1,11 +1,17 @@
+from __future__ import annotations
+
 import copy
 import sqlite3
 import tempfile
 import unittest
+from collections.abc import Callable, Mapping
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict
 
 import yaml
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Dialog, sync_playwright
 
 from edurec_mappings.anonymize import anonymize
 from edurec_mappings.browser import (
@@ -14,22 +20,26 @@ from edurec_mappings.browser import (
     COMMENTS,
     NotInQueueError,
     Reviewer,
-    button_for,
 )
 from edurec_mappings.cli import DOWNLOAD_TABLES, forget_downloads, main, parse_args
 from edurec_mappings.models import (
     NOT_IN_QUEUE,
     PENDING,
     Clicked,
+    Confidence,
     Decision,
+    Identity,
     Left,
+    Outcome,
     Request,
     Reviewed,
     Skipped,
-    as_dict,
+    Tab,
+    Verdict,
     hydrate,
+    plain,
 )
-from edurec_mappings.parse import DETAIL
+from edurec_mappings.parse import DETAIL, digest
 from edurec_mappings.review import (
     OVERLAP_FAIR,
     OVERLAP_GOOD,
@@ -52,17 +62,61 @@ from edurec_mappings.review import (
 from edurec_mappings.store import document, dump, save
 from tests.test_export import records
 
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
 STARTED = "2026-09-22T10:00:00+00:00"
+
+
+class DecisionFields(TypedDict, total=False):
+    source_export: str
+    source_started_at: str
+    course: str
+    comment: str
+    overlap_percentage: int
+    decision_confidence: Confidence
+    overlap: list[str]
+    missing_from_pu: list[str]
+    extra_in_pu: list[str]
+    concerns: list[str]
+    remap_target: str | None
+    remap_analysis: str | None
+    fallback_verdict: Verdict | None
+    fallback_comment: str | None
+    fallback_rationale: str | None
+
+
+class Fallback(TypedDict):
+    fallback_verdict: Verdict
+    fallback_comment: str
+    fallback_rationale: str
+
+
+class PanelState(TypedDict):
+    viewed: str | None
+    selected: str | None
+    pill: str
+    modified: list[str]
+    markers: dict[str, list[list[str | bool]]]
+    reason: str
+    scrollTop: int
+    outlined: dict[str, str]
+
+
+def button_for(verdict: Verdict) -> str:
+    return next(button for button, value in BUTTONS.items() if value == verdict)
+
+
 PROGRESS = Progress(position=3, total=12, submitted=5, requests=104)
 GREEN, AMBER, RED = "#2e7d32", "#ef6c00", "#c62828"
-FALLBACK = {
+FALLBACK: Fallback = {
     "fallback_verdict": "request remapping",
     "fallback_comment": "Planning is missing. Consider remapping to CS5242.",
     "fallback_rationale": "Overlap is close to the 70% <threshold>.",
 }
 
 
-def ordered(html, *needles):
+def ordered(html: str, *needles: str) -> None:
     """Assert every needle occurs in `html`, in the given order."""
     position = -1
     for needle in needles:
@@ -71,24 +125,26 @@ def ordered(html, *needles):
         position = found
 
 
-def decision(request, verdict="approve", **overrides):
-    values = {
-        "source_export": "anon",
-        "source_started_at": STARTED,
-        "request_id": request.request_id,
-        "course": "CS 1 (PU) -> CS3243",
-        "verdict": verdict,
-        "comment": "Approved: the syllabus covers search & <planning>.",
-        "overlap_percentage": 85,
-        "decision_confidence": "high",
-        "overlap": ["Search"],
-        "missing_from_pu": ["Planning"],
-        "concerns": ["Weight of exam < 50%"],
-    }
-    return Decision(**{**values, **overrides})
+def decision(
+    request: Request, verdict: Verdict = "approve", **overrides: Unpack[DecisionFields]
+) -> Decision:
+    values = Decision(
+        source_export="anon",
+        source_started_at=STARTED,
+        request_id=request.request_id,
+        course="CS 1 (PU) -> CS3243",
+        verdict=verdict,
+        comment="Approved: the syllabus covers search & <planning>.",
+        overlap_percentage=85,
+        decision_confidence="high",
+        overlap=["Search"],
+        missing_from_pu=["Planning"],
+        concerns=["Weight of exam < 50%"],
+    )
+    return replace(values, **overrides)
 
 
-def make_run(directory, count=4):
+def make_run(directory: str, count: int = 4) -> tuple[Path, Path, list[Request]]:
     """An export of `count` requests, its anonymized copy and a decision for each."""
     run, anon = Path(directory) / "run", Path(directory) / "run-anonymized"
     requests = [copy.deepcopy(r) for _, r in records()[:count]]
@@ -103,23 +159,28 @@ def make_run(directory, count=4):
     for request in requests:
         path = anon / "decisions" / f"{request.request_id}.yaml"
         path.parent.mkdir(exist_ok=True)
-        path.write_text(dump(as_dict(decision(request))))
+        path.write_text(dump(plain(decision(request))))
     return run, anon / "decisions", requests
 
 
 class FakeSite:
     """Scripted reviewer: `outcomes` maps request_id to what the human does."""
 
-    def __init__(self, outcomes, live=None, status_after="Approved"):
+    def __init__(
+        self,
+        outcomes: Mapping[str, Outcome | Callable[[], Outcome]],
+        live: Mapping[str, Request | Exception] | None = None,
+        status_after: str | Exception = "Approved",
+    ) -> None:
         self.outcomes = outcomes
         self.live = live or {}
         self.status_after = status_after
         """A string, or an exception to raise from `status`."""
-        self.opened = []
-        self.prepared = []
+        self.opened: list[str] = []
+        self.prepared: list[tuple[str, str, bool]] = []
         self.current = ""
 
-    def open(self, request):
+    def open(self, request: Request) -> Request:
         self.opened.append(request.request_id)
         live = self.live.get(request.request_id, request)
         if isinstance(live, Exception):
@@ -129,40 +190,76 @@ class FakeSite:
         self.current = live.request_id
         return live
 
-    def prepare(self, decision, panel, dry_run):
+    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> dict[Tab, str]:
         self.prepared.append((decision.request_id, panel, dry_run))
         live = self.live.get(self.current)
+        assert not isinstance(live, Exception)
         return decision.prefills(live.comments if live else None)
 
-    def await_action(self):
+    def await_action(self) -> Outcome:
         outcome = self.outcomes[self.current]
         return outcome() if callable(outcome) else outcome
 
-    def status(self, request):
+    def status(self, request: Request) -> str:
         if isinstance(self.status_after, Exception):
             raise self.status_after
         return self.status_after
 
 
 class ReviewTests(unittest.TestCase):
-    def test_hydrate_is_the_inverse_of_plain(self):
+    def test_hydrate_is_the_inverse_of_plain(self) -> None:
         _, request = records()[0]
-        loaded = hydrate(Request, yaml.safe_load(dump(request.to_dict())))
+        loaded = hydrate(Request, yaml.safe_load(dump(plain(request))))
         self.assertEqual(loaded, request)
-        self.assertEqual(hydrate(Decision, as_dict(decision(request))), decision(request))
+        self.assertEqual(hydrate(Decision, plain(decision(request))), decision(request))
         with self.assertRaises(ValueError):
             hydrate(Decision, ["not", "a", "record"])
 
-    def test_decisions_from_another_export_or_unknown_request_are_skipped(self):
+    def test_request_ids_are_stable(self) -> None:
+        identity = Identity(
+            student_id="A0000001X",
+            academic_career="Undergraduate",
+            partner_university="Technical University of Munich",
+            study_program="SEP",
+            term="2025/2026 Semester 1",
+            mapping_number="1",
+            sequence="2",
+        )
+        # Decision files name requests by this digest; a change orphans them all.
+        self.assertEqual(digest(plain(identity)), "de5da59c3dd5b0f985ad04da")
+
+    def test_malformed_decisions_are_refused(self) -> None:
+        _, request = records()[0]
+        valid = plain(decision(request))
+        for field, value in [
+            ("verdict", "Approve"),
+            ("decision_confidence", "High"),
+            ("overlap_percentage", "80"),
+            ("overlap_percentage", 80.5),
+            ("concerns", "one concern"),
+            ("fallback_verdit", "reject"),
+            # An unquoted YAML timestamp loads as a datetime, which JSON cannot hold.
+            ("source_started_at", datetime(2026, 9, 22, tzinfo=timezone.utc)),
+        ]:
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                hydrate(Decision, {**valid, field: value})
+
+    def test_malformed_decision_file_is_named(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run, decisions, requests = make_run(directory)
+            path = decisions / f"{requests[0].request_id}.yaml"
+            path.write_text(dump({**plain(decision(requests[0])), "verdict": "Approve"}))
+            with self.assertRaisesRegex(ValueError, path.name):
+                load_queue(run, decisions)
+
+    def test_decisions_from_another_export_or_unknown_request_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             stale = decisions / f"{requests[0].request_id}.yaml"
-            stale.write_text(dump(as_dict(decision(requests[0], source_started_at="older"))))
+            stale.write_text(dump(plain(decision(requests[0], source_started_at="older"))))
             orphan = copy.deepcopy(requests[1])
             orphan.request_id = "0" * 24
-            (decisions / "000000000000000000000000.yaml").write_text(
-                dump(as_dict(decision(orphan)))
-            )
+            (decisions / "000000000000000000000000.yaml").write_text(dump(plain(decision(orphan))))
             queue, rejected = load_queue(run, decisions)
             self.assertEqual(
                 [item.request.request_id for item in queue],
@@ -173,7 +270,7 @@ class ReviewTests(unittest.TestCase):
             self.assertIn("no requests/", rejected[orphan.request_id])
             self.assertEqual(queue[0].request.identity.student_id, requests[1].identity.student_id)
 
-    def test_mismatched_run_and_decisions_are_refused(self):
+    def test_mismatched_run_and_decisions_are_refused(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, _ = make_run(directory)
             inventory = yaml.safe_load((run / "inventory.yaml").read_text())
@@ -182,11 +279,11 @@ class ReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "different export"):
                 load_queue(run, decisions)
 
-    def test_queue_keeps_siblings_together_and_honours_filters(self):
+    def test_queue_keeps_siblings_together_and_honours_filters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             path = decisions / f"{requests[1].request_id}.yaml"
-            path.write_text(dump(as_dict(decision(requests[1], verdict="reject"))))
+            path.write_text(dump(plain(decision(requests[1], verdict="reject"))))
             queue, _ = load_queue(run, decisions)
             ids = [item.request.request_id for item in queue]
             sibling_positions = [
@@ -234,7 +331,7 @@ class ReviewTests(unittest.TestCase):
                 [i.request.request_id for i in select(queue, [], request_ids=[ids[2]])], [ids[2]]
             )
 
-    def test_entries_from_before_the_export_do_not_block_a_resubmission(self):
+    def test_entries_from_before_the_export_do_not_block_a_resubmission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             queue, _ = load_queue(run, decisions)
@@ -287,7 +384,7 @@ class ReviewTests(unittest.TestCase):
                 "Without an export start, every entry counts as before",
             )
 
-    def test_reviewed_log_round_trip(self):
+    def test_reviewed_log_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / REVIEWED
             self.assertEqual(load_reviewed(path), [])
@@ -303,10 +400,10 @@ class ReviewTests(unittest.TestCase):
                 dry_run=True,
                 reason="comment is empty",
             )
-            path.write_text(dump([as_dict(entry)]))
+            path.write_text(dump([plain(entry)]))
             self.assertEqual(load_reviewed(path), [entry])
 
-    def test_freshness_comparison(self):
+    def test_freshness_comparison(self) -> None:
         _, exported = records()[0]
         live = copy.deepcopy(exported)
         live.status = PENDING
@@ -321,13 +418,13 @@ class ReviewTests(unittest.TestCase):
         changed.identity.sequence = "7"
         self.assertIn("sequence", stale_reason(exported, changed) or "")
 
-    def test_comment_sanity(self):
+    def test_comment_sanity(self) -> None:
         self.assertIsNone(comment_problem("Consider remapping to CS5242."))
         self.assertIn("empty", comment_problem("  ") or "")
         self.assertIn("[", comment_problem("Fill in [course]") or "")
         self.assertIn("XXXX", comment_problem("Consider remapping to CSXXXX.") or "")
 
-    def test_verdict_button_mapping(self):
+    def test_verdict_button_mapping(self) -> None:
         self.assertEqual(len(BUTTONS), 4)
         for button, verdict in BUTTONS.items():
             self.assertEqual(button_for(verdict), button)
@@ -335,7 +432,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(BUTTONS["N_SR_EXT_STD_DW_REQUEST_BTN"], "request remapping")
         self.assertNotIn(CANCEL, BUTTONS)
 
-    def test_panel_html_shows_the_decision_in_order_and_escapes_content(self):
+    def test_panel_html_shows_the_decision_in_order_and_escapes_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             queue, _ = load_queue(run, decisions)
@@ -436,7 +533,9 @@ class ReviewTests(unittest.TestCase):
             self.assertNotIn("fresh", html)
             self.assertNotIn("Dry run", panel_html(item, PROGRESS, [], dry_run=False))
 
-    def test_panel_without_fallback_verdict_offers_no_selection_and_names_siblings_by_id(self):
+    def test_panel_without_fallback_verdict_offers_no_selection_and_names_siblings_by_id(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             queue, _ = load_queue(run, decisions)
@@ -470,17 +569,18 @@ class ReviewTests(unittest.TestCase):
             self.assertIn(f"{requests[1].request_id}: not yet submitted", html)
             self.assertNotIn("different action", html)
 
-    def test_header_badges_colour_confidence_and_overlap(self):
+    def test_header_badges_colour_confidence_and_overlap(self) -> None:
         _, request = records()[0]
         self.assertEqual((OVERLAP_GOOD, OVERLAP_FAIR), (70, 40))
         self.assertEqual(overlap_colour(OVERLAP_GOOD), GREEN)
         self.assertEqual(overlap_colour(OVERLAP_GOOD - 1), AMBER)
         self.assertEqual(overlap_colour(OVERLAP_FAIR), AMBER)
         self.assertEqual(overlap_colour(OVERLAP_FAIR - 1), RED)
-        for confidence, overlap, colours in [
+        cases: list[tuple[Confidence, int, tuple[str, str]]] = [
             ("medium", 55, (AMBER, AMBER)),
             ("low", 20, (RED, RED)),
-        ]:
+        ]
+        for confidence, overlap, colours in cases:
             advice = decision(request, decision_confidence=confidence, overlap_percentage=overlap)
             html = panel_html(Item(advice, request), PROGRESS, [], dry_run=False)
             badge = f'style="background:{colours[0]}">{confidence.title()} Confidence<'
@@ -488,13 +588,13 @@ class ReviewTests(unittest.TestCase):
             self.assertGreater(html.index(badge), html.index("</header>"), "not in the header")
             self.assertIn(f'style="background:{colours[1]}">{overlap}% Overlap<', html)
 
-    def test_course_names_come_from_the_decision_files(self):
+    def test_course_names_come_from_the_decision_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, decisions, requests = make_run(directory, count=2)
             names = course_names(decisions)
             self.assertEqual(names, {r.request_id: "CS 1 (PU) -> CS3243" for r in requests})
 
-    def test_comment_source_follows_the_selected_tab(self):
+    def test_comment_source_follows_the_selected_tab(self) -> None:
         _, request = records()[0]
         advice = decision(request, **FALLBACK)
         prefills = advice.prefills("older")
@@ -513,7 +613,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(comment_source(None, None, prefills), "edited")
         self.assertEqual(list(decision(request).prefills(None)), ["recommended"])
 
-    def test_loop_logs_every_outcome_and_stops_when_unverified(self):
+    def test_loop_logs_every_outcome_and_stops_when_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             approve, reject = button_for("approve"), button_for("reject")
@@ -557,7 +657,7 @@ class ReviewTests(unittest.TestCase):
             ordered(panels[0], "width:50%", "1 of 2 this session &middot; 2 of 4 overall")
             ordered(panels[1], "width:100%", "2 of 2 this session &middot; 2 of 4 overall")
 
-    def test_dry_run_and_unverified_submission(self):
+    def test_dry_run_and_unverified_submission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=2)
             ids = [r.request_id for r in requests]
@@ -574,7 +674,7 @@ class ReviewTests(unittest.TestCase):
             self.assertIn("not verified", entries[-1].reason or "")
             self.assertEqual(len(entries), 3)
 
-    def test_leaving_the_page_and_a_vanished_request_are_logged_as_skips(self):
+    def test_leaving_the_page_and_a_vanished_request_are_logged_as_skips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=3)
             ids = [r.request_id for r in requests]
@@ -601,7 +701,7 @@ class ReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 review(FakeSite({}, live=dict.fromkeys(ids, RuntimeError("boom"))), run, decisions)
 
-    def test_click_is_on_record_before_verification_and_survives_a_crash(self):
+    def test_click_is_on_record_before_verification_and_survives_a_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=2)
             ids = [r.request_id for r in requests]
@@ -626,12 +726,12 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(entries[1].reason, None)
             self.assertEqual(entries[1].status_after, "Approved")
 
-    def test_request_that_left_the_queue_counts_as_verified(self):
+    def test_request_that_left_the_queue_counts_as_verified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=1)
             remap = button_for("request remapping")
             advice = decision(requests[0], **FALLBACK)
-            (decisions / f"{requests[0].request_id}.yaml").write_text(dump(as_dict(advice)))
+            (decisions / f"{requests[0].request_id}.yaml").write_text(dump(plain(advice)))
             outcome = Clicked(remap, advice.prefills(None)["fallback"], "fallback")
             site = FakeSite({requests[0].request_id: outcome}, status_after=NOT_IN_QUEUE)
             (entry,) = review(site, run, decisions)
@@ -641,18 +741,18 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(entry.status_after, NOT_IN_QUEUE)
             self.assertIsNone(entry.reason)
 
-    def test_bad_comment_is_never_prefilled(self):
+    def test_bad_comment_is_never_prefilled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=1)
             path = decisions / f"{requests[0].request_id}.yaml"
-            path.write_text(dump(as_dict(decision(requests[0], comment="Use [code]"))))
+            path.write_text(dump(plain(decision(requests[0], comment="Use [code]"))))
             site = FakeSite({})
             log = review(site, run, decisions)
             self.assertEqual(site.prepared, [])
             self.assertEqual(log[0].action, "skip")
             self.assertIn("[", log[0].reason or "")
 
-    def test_injected_hook_reports_skip_confirm_click_and_cancel(self):
+    def test_injected_hook_reports_skip_confirm_click_and_cancel(self) -> None:
         buttons = "".join(
             f'<input type="button" id="{i}" value="{v.title()}" '
             'onclick="submitAction_win0(document.win0,this.id,event);">'
@@ -706,7 +806,7 @@ class ReviewTests(unittest.TestCase):
             box = page.locator(f'[id="{COMMENTS}"]')
             messages, posts, answers = [], [], []  # type: list[str], list[object], list[bool]
 
-            def answer(dialog):
+            def answer(dialog: Dialog) -> None:
                 messages.append(dialog.message)
                 if answers and answers.pop(0):
                     dialog.accept()
@@ -716,19 +816,19 @@ class ReviewTests(unittest.TestCase):
             page.on("dialog", answer)
             page.on("request", lambda r: posts.append(r) if r.method == "POST" else None)
 
-            def later(script, delay=100):
+            def later(script: str, delay: int = 100) -> None:
                 page.evaluate(f"setTimeout(() => {{ {script} }}, {delay})")
 
-            def press(button_id):
+            def press(button_id: str) -> str:
                 return f"document.getElementById('{button_id}').click();"
 
-            def in_panel(selector):
+            def in_panel(selector: str) -> str:
                 host = "document.getElementById('edurec-review-panel')"
                 return f"{host}.shadowRoot.querySelector('{selector}')"
 
-            def panel_state():
+            def panel_state() -> PanelState:
                 root = "document.getElementById('edurec-review-panel').shadowRoot"
-                return page.evaluate(f"""() => ({{
+                state: PanelState = page.evaluate(f"""() => ({{
                     viewed: {in_panel(".tab.active")}?.dataset.tab,
                     selected: {in_panel(".pane.selected")}?.dataset.tab,
                     pill: {in_panel(".pill.active")}.textContent,
@@ -744,12 +844,13 @@ class ReviewTests(unittest.TestCase):
                     outlined: Object.fromEntries('{",".join(BUTTONS)}'.split(',').map(
                         id => [id, document.getElementById(id).style.outline])),
                 }})""")
+                return state
 
-            def outlined():
+            def outlined() -> set[str]:
                 state = panel_state()["outlined"]
                 return {id for id, outline in state.items() if outline}
 
-            def set_box(value):
+            def set_box(value: str) -> None:
                 page.evaluate(
                     f"""() => {{ const box = document.getElementById('{COMMENTS}');
                     box.value = {value!r}; box.dispatchEvent(new Event('input')); }}"""
@@ -980,7 +1081,7 @@ class ReviewTests(unittest.TestCase):
             )
             browser.close()
 
-    def test_review_arguments(self):
+    def test_review_arguments(self) -> None:
         args = parse_args(["review", "--run", "out/x", "--request-id", "a", "--verdict", "reject"])
         self.assertEqual(args.decisions, str(Path("out/x-anonymized/decisions")))
         self.assertEqual((args.request_ids, args.verdicts), (["a"], ["reject"]))
@@ -997,14 +1098,16 @@ if __name__ == "__main__":
 
 
 class PrefillTests(unittest.TestCase):
-    def test_decision_comment_goes_on_top_of_existing_text(self):
+    def test_decision_comment_goes_on_top_of_existing_text(self) -> None:
         _, request = records()[0]
         advice = decision(request)
-        self.assertEqual(advice.prefill(None), advice.comment)
-        self.assertEqual(advice.prefill("  "), advice.comment)
-        self.assertEqual(advice.prefill("older note\n"), advice.comment + "\n\nolder note")
+        self.assertEqual(advice.prefills(None)["recommended"], advice.comment)
+        self.assertEqual(advice.prefills("  ")["recommended"], advice.comment)
+        self.assertEqual(
+            advice.prefills("older note\n")["recommended"], advice.comment + "\n\nolder note"
+        )
 
-    def test_panel_shows_the_existing_comment(self):
+    def test_panel_shows_the_existing_comment(self) -> None:
         _, request = records()[0]
         item = Item(decision(request), request)
         html = panel_html(item, Progress(1, 1, 0, 1), [], False, existing="kept <below>")
@@ -1013,7 +1116,7 @@ class PrefillTests(unittest.TestCase):
         self.assertNotIn("Previous comments", panel_html(item, Progress(1, 1, 0, 1), [], False))
 
 
-def test_forget_downloads_clears_history_tables(tmp_path):
+def test_forget_downloads_clears_history_tables(tmp_path: Path) -> None:
     history = tmp_path / "Default" / "History"
     history.parent.mkdir()
     with sqlite3.connect(history) as connection:

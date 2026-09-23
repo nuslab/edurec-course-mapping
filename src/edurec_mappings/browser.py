@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Collection
 from dataclasses import replace
+from pathlib import Path
+from typing import Literal, TypedDict
 from urllib.parse import parse_qs
 
 from bs4 import BeautifulSoup
@@ -31,8 +33,8 @@ from .models import (
     Skipped,
     Tab,
     Verdict,
-    as_dict,
     display,
+    plain,
 )
 from .parse import DETAIL, GRID, NEXT, VIEW_ALL, detail, digest, expand_action, listing
 
@@ -66,149 +68,32 @@ BUTTONS: dict[str, Verdict] = {
 REVIEWER_ACTIONS = frozenset({*BUTTONS, "#ICList"})
 CAP = 300  # Observed server cap; exactly 300 rows is treated as capped.
 ROW_ACTION = re.compile(r"#ICRow\d+")
-SETTLED = """({old, target}) => {
-    const state = document.getElementById('ICStateNum');
-    return state && state.value !== old &&
-        !(typeof isLoaderInProcess === 'function' && isLoaderInProcess()) &&
-        (!target || document.getElementById(target));
-}"""
-# The reviewer pressed the panel's Skip, or the state changed: an EduRec button was
-# pressed, or PeopleSoft re-rendered the page on an innocuous interaction.
-SIGNALLED = """(old) => {
-    const review = window.__edurecReview;
-    const state = document.getElementById('ICStateNum');
-    return !!(review && review.skipped) || !!(state && state.value !== old);
-}"""
-SKIPPED = (
-    "() => { const a = window.__edurecReview || {}; return a.skipped ? a.state.skipReason : null; }"
-)
-SET_BOX = """
-    const setBox = (box, value) => {
-        box.value = value;
-        for (const type of ['input', 'change']) box.dispatchEvent(new Event(type, {bubbles: true}));
-    };"""
-"""Fill a PeopleSoft field and fire the events its delegated handlers listen for."""
-SET_COMMENT = (
-    "({id, value}) => {"
-    + SET_BOX
-    + """
-    const box = document.getElementById(id);
-    if (!box) throw new Error('Comment box not found');
-    setBox(box, value);
-}"""
-)
-INSTALL = (
-    "({panel, buttons, cancel, verdicts, prefills, colours, dryRun, comments, fresh}) => {"
-    + SET_BOX
-    + """
-    const prior = window.__edurecReview;
-    prior?.unhook();
-    const hooks = [];
-    const listen = (target, type, handler) => {
-        target.addEventListener(type, handler, true);
-        hooks.push([target, type, handler]);
-    };
-    const initial = {selected: 'recommended', viewed: 'recommended', scrollTop: 0, skipReason: ''};
-    const state = !fresh && prior ? prior.state : initial;
-    const review = window.__edurecReview = {
-        skipped: false, clicked: null, state,
-        unhook: () => hooks.forEach(([t, type, h]) => t.removeEventListener(type, h, true)),
-    };
-    const box = document.getElementById(comments);
-    document.getElementById('edurec-review-panel')?.remove();
-    const host = document.createElement('div');
-    host.id = 'edurec-review-panel';
-    const root = host.attachShadow({mode: 'open'});
-    root.innerHTML = panel;
-    document.body.appendChild(host);
-    const $ = selector => root.querySelector(selector);
-    const $$ = selector => [...root.querySelectorAll(selector)];
-    const block = event => { event.preventDefault(); event.stopImmediatePropagation(); };
+SCRIPT = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
+Command = Literal["settled", "signalled", "skipped", "clicked", "comment", "install"]
 
-    const names = {recommended: 'Recommended', fallback: 'Fallback'};
-    const modified = () => !!box && box.value.trim() !== (prefills[state.selected] || '').trim();
-    const mark = () => { for (const el of $$('.modified')) el.hidden = !modified(); };
-    const fill = value => {
-        if (!box) return;
-        setBox(box, value);
-        mark();
-    };
-    // Viewing a tab shows its pane; selecting one decides the comment, outline and pill.
-    const view = tab => {
-        state.viewed = tab;
-        for (const el of $$('.tab, .pane')) el.classList.toggle('active', el.dataset.tab === tab);
-    };
-    const choose = tab => {
-        state.selected = tab;
-        for (const el of $$('.pill[data-tab]')) {
-            el.classList.toggle('active', el.dataset.tab === tab);
-        }
-        for (const el of $$('.pane')) el.classList.toggle('selected', el.dataset.tab === tab);
-        for (const el of $$('.select')) {
-            el.disabled = el.closest('.pane').dataset.tab === tab;
-            el.textContent = el.disabled ? 'Selected' : 'Select';
-        }
-        for (const [id, verdict] of Object.entries(buttons)) {
-            const button = document.getElementById(id);
-            const active = verdict === verdicts[tab];
-            if (button) button.style.outline = active ? `3px solid ${colours[verdict]}` : '';
-        }
-        mark();
-    };
-    const select = tab => {
-        if (tab === state.selected) return;
-        const question = `The comment box differs from the ${names[state.selected]} comment. ` +
-            `Replace it with the ${names[tab]} comment?`;
-        if (modified() && !window.confirm(question)) return;
-        choose(tab);
-        fill(prefills[tab]);
-    };
 
-    for (const tab of $$('.tab')) tab.onclick = () => view(tab.dataset.tab);
-    for (const el of $$('.select')) el.onclick = () => select(el.closest('.pane').dataset.tab);
-    for (const reset of $$('.reset')) reset.onclick = () => fill(prefills[state.selected]);
-    if (box) listen(box, 'input', mark);
-    const reason = $('#reason');
-    reason.value = state.skipReason;
-    reason.oninput = () => { state.skipReason = reason.value; };
-    $('#skip').onclick = () => { review.skipped = true; };
-    choose(state.selected);
-    view(state.viewed);
-    const body = $('#body');  // Scroll after the tab is shown, or anchoring shifts the offset.
-    body.scrollTop = state.scrollTop;
-    body.onscroll = () => { state.scrollTop = body.scrollTop; };
+def run(frame: Frame, command: Command, **args: object) -> object:
+    """Run one of `page.js`'s commands in the frame and return its result."""
+    return frame.evaluate(SCRIPT, {"command": command, **args})
 
-    for (const id of [...Object.keys(buttons), cancel]) {
-        const button = document.getElementById(id);
-        if (!button) continue;
-        if (id !== cancel) button.disabled = dryRun;
-        listen(button, 'click', event => {
-            const verdict = buttons[id];
-            if (dryRun && verdict) {
-                block(event);
-                window.alert('Dry run: nothing is submitted');
-                return;
-            }
-            if (verdict && verdict !== verdicts[state.selected]) {
-                if (verdict === verdicts.fallback) {
-                    const question =
-                        'This matches the fallback. Switch to the fallback comment and submit?';
-                    if (!window.confirm(question)) return block(event);
-                    choose('fallback');
-                    fill(prefills.fallback);
-                } else {
-                    const label =
-                        state.selected === 'fallback' ? 'Fallback selected' : 'Recommended';
-                    const question =
-                        `${label}: ${verdicts[state.selected]}. Submit ${button.value} anyway?`;
-                    if (!window.confirm(question)) return block(event);
-                }
-            }
-            review.clicked = {id, comment: box ? box.value : null, tab: state.selected};
-        });
-    }
-}"""
-)
+
+def wait(frame: Frame, command: Command, timeout: float, **args: object) -> None:
+    """Wait until one of `page.js`'s commands returns a truthy value."""
+    frame.wait_for_function(SCRIPT, arg={"command": command, **args}, timeout=timeout)
+
+
+class Install(TypedDict):
+    """What `page.js` needs to draw the panel and hook the buttons; see `Reviewer`."""
+
+    panel: str
+    buttons: dict[str, str]
+    """EduRec button id -> the verdict it submits, in display form."""
+    cancel: str
+    verdicts: dict[Tab, str | None]
+    prefills: dict[Tab, str]
+    colours: dict[str, str]
+    dry_run: bool
+    comments: str
 
 
 class ApprovalNotLoadedError(RuntimeError):
@@ -284,7 +169,7 @@ def validate_rows(partition: Partition, rows: list[ListRow]) -> None:
 
 def list_identity(page: Listing) -> str:
     """Fingerprint a results page by its displayed values; row actions change per render."""
-    return digest({**as_dict(page), "rows": [row.cells() for row in page.rows]})
+    return digest({**plain(page), "rows": [row.cells() for row in page.rows]})
 
 
 class EduRec:
@@ -328,11 +213,11 @@ class EduRec:
         response.finished()
         if response.status >= 400:
             raise RuntimeError(f"EduRec action failed: HTTP {response.status}")
-        self.frame().wait_for_function(
-            SETTLED, arg={"old": old_state, "target": target}, timeout=self.timeout_ms
-        )
+        wait(self.frame(), "settled", self.timeout_ms, old=old_state, target=target)
 
-    def criterion(self, field: str, low: object = None, high: object = None) -> None:
+    def criterion(
+        self, field: str, low: str | int | None = None, high: str | int | None = None
+    ) -> None:
         # A missing bound denotes an unbounded string range; both missing clears.
         if low is None and high is None:
             operator, value = "=", ""
@@ -469,10 +354,6 @@ class NotInQueueError(RuntimeError):
     """The request's identity search found no row: it left the approval queue."""
 
 
-def button_for(verdict: Verdict) -> str:
-    return next(button for button, value in BUTTONS.items() if value == verdict)
-
-
 def posted(actions: Collection[str]) -> Callable[[Response], bool]:
     """Match the PeopleSoft postback whose `ICAction` is one of `actions`."""
 
@@ -517,7 +398,7 @@ class Reviewer(EduRec):
     """
 
     prior_comment: str = ""
-    install: dict[str, object]
+    install: Install
 
     def prepare(self, decision: Decision, panel: str, dry_run: bool) -> dict[Tab, str]:
         frame = self.frame()
@@ -525,27 +406,26 @@ class Reviewer(EduRec):
         prefills = decision.prefills(self.prior_comment)
         self.comment(prefills["recommended"])
         # The hook compares and quotes verdicts in their display form only.
-        verdicts = {
+        verdicts: dict[Tab, str | None] = {
             "recommended": display(decision.verdict),
             "fallback": display(decision.fallback_verdict) if decision.fallback_verdict else None,
         }
-        self.install = {
-            "panel": panel,
-            "buttons": {id: display(verdict) for id, verdict in BUTTONS.items()},
-            "cancel": CANCEL,
-            "verdicts": verdicts,
-            "prefills": prefills,
-            "colours": {display(verdict): colour for verdict, colour in VERDICT_COLOURS.items()},
-            "dryRun": dry_run,
-            "comments": COMMENTS,
-            "fresh": False,
-        }
-        frame.evaluate(INSTALL, {**self.install, "fresh": True})
+        self.install = Install(
+            panel=panel,
+            buttons={id: display(verdict) for id, verdict in BUTTONS.items()},
+            cancel=CANCEL,
+            verdicts=verdicts,
+            prefills=prefills,
+            colours={display(verdict): colour for verdict, colour in VERDICT_COLOURS.items()},
+            dry_run=dry_run,
+            comments=COMMENTS,
+        )
+        run(frame, "install", **self.install, fresh=True)
         return prefills
 
     def comment(self, value: str) -> None:
         # No inline onchange: dispatch the events PeopleSoft's delegated handlers listen for.
-        self.frame().evaluate(SET_COMMENT, {"id": COMMENTS, "value": value})
+        run(self.frame(), "comment", id=COMMENTS, value=value)
 
     def pending_detail(self) -> bool:
         """Whether the frame still shows a detail page in "Pending Approval"."""
@@ -567,9 +447,9 @@ class Reviewer(EduRec):
         try:
             previous = self.state()
             while True:
-                frame.wait_for_function(SIGNALLED, arg=previous, timeout=0)
+                wait(frame, "signalled", 0, old=previous)
                 current = self.state()  # Read before `seen`: a response precedes its DOM update.
-                skipped = frame.evaluate(SKIPPED)
+                skipped = run(frame, "skipped")
                 if skipped is not None:
                     self.comment(self.prior_comment)
                     return Skipped(str(skipped))
@@ -578,12 +458,12 @@ class Reviewer(EduRec):
                     break
                 if not self.pending_detail():
                     return Left()
-                frame.evaluate(INSTALL, self.install)
+                run(frame, "install", **self.install, fresh=False)
                 previous = current
         finally:
             frame.page.remove_listener("response", collect)
         form = parse_qs(seen[0].request.post_data or "")
-        hooked = frame.evaluate("() => (window.__edurecReview || {}).clicked")
+        hooked = run(frame, "clicked")
         if isinstance(hooked, dict):
             return Clicked(form["ICAction"][0], hooked["comment"], hooked["tab"])
         return Clicked(form["ICAction"][0], form.get(COMMENTS, [None])[0])

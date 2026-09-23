@@ -16,11 +16,11 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
-from html import escape
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
 import yaml
+from jinja2 import Environment, PackageLoader, StrictUndefined
 
 from .anonymize import anonymized_path
 from .browser import BUTTONS, NotInQueueError
@@ -59,44 +59,15 @@ FRESHNESS_FIELDS = (
     "identity.mapping_number",
     "identity.sequence",
 )
-PANEL_CSS = """
-:host{position:fixed;top:8px;right:8px;width:360px;max-height:95vh;display:flex;
-flex-direction:column;z-index:2147483647;background:#fffef5;border:2px solid #555;
-border-radius:6px;font:13px/1.4 sans-serif;color:#222;box-shadow:0 2px 8px rgba(0,0,0,.3)}
-header,footer{padding:8px 10px;flex:none}
-header{border-bottom:1px solid #ccc}
-footer{border-top:1px solid #ccc;display:flex;gap:6px}
-#body{overflow:auto;padding:0 10px 8px;flex:1 1 auto}
-p{margin:4px 0}
-ul{margin:0;padding-left:18px}
-.badges{display:flex;flex-wrap:wrap;gap:6px}
-.pill{font-weight:bold;color:#fff;padding:2px 8px;border-radius:4px}
-.pill[data-tab]:not(.active){display:none}
-.course{margin-top:6px;font-size:12px;color:#444}
-.bar{height:3px;margin:4px 0 2px;border-radius:2px;background:#ddd}
-.bar span{display:block;height:100%;border-radius:2px;background:#555}
-.progress{display:flex;justify-content:space-between;gap:6px;font-size:11px;color:#444}
-.warn{padding:1px 6px;border-radius:3px;background:#ffe082;color:#222}
-.label{margin:12px 0 2px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#444}
-.comment{white-space:pre-wrap;background:#f4f4f4;padding:4px}
-.tabs{display:flex;gap:2px;margin-top:12px}
-.tab{padding:4px 10px;border:1px solid #bbb;border-bottom:none;border-radius:4px 4px 0 0;
-background:#eee;color:#333;cursor:pointer;font:inherit}
-.tab.active{background:#fff;font-weight:bold;position:relative;margin-bottom:-1px}
-.pane{display:none;padding:6px 8px;border:1px solid #bbb;border-radius:0 4px 4px 4px;
-background:#fff}
-.pane.active{display:block}
-.pane:not(.selected) .modified{display:none}
-.tools{text-align:right;font-size:12px}
-.tools button{font-size:12px;padding:2px 8px;margin-left:6px}
-.modified{color:#b26a00;font-weight:bold;margin-left:6px}
-button{padding:4px 10px;font:inherit;cursor:pointer}
-#reason{flex:1;font:inherit;padding:4px}
-"""
 CONFIDENCE_COLOURS: dict[Confidence, str] = {"high": GREEN, "medium": AMBER, "low": RED}
 OVERLAP_GOOD = 70
 """Overlap percentage from which the header badge is green; amber from `OVERLAP_FAIR`."""
 OVERLAP_FAIR = 40
+TEMPLATES = Environment(
+    loader=PackageLoader("edurec_mappings"), autoescape=True, undefined=StrictUndefined
+)
+TEMPLATES.filters["display"] = display
+PANEL = TEMPLATES.get_template("panel.html")
 
 
 class Log:
@@ -115,7 +86,7 @@ class Log:
         self.flush()
 
     def flush(self) -> None:
-        write_atomic(self.path, dump(plain(self.entries)))
+        write_atomic(self.path, dump([plain(entry) for entry in self.entries]))
 
 
 class Progress(NamedTuple):
@@ -171,8 +142,11 @@ def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict
         raise RuntimeError(f"{decisions} belongs to a different export than {run}")
     items: list[Item] = []
     rejected: dict[str, str] = {}
-    for data in decision_files(decisions):
-        decision = hydrate(Decision, data)
+    for path, data in decision_files(decisions):
+        try:
+            decision = hydrate(Decision, data)
+        except ValueError as error:
+            raise ValueError(f"{path}: {error}") from error
         request_path = run / REQUESTS / f"{decision.request_id}.yaml"
         if decision.source_started_at != expected:
             rejected[decision.request_id] = (
@@ -190,11 +164,11 @@ def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict
     return items, rejected
 
 
-def decision_files(decisions: Path) -> Iterator[object]:
-    """The parsed content of each decision file, in file-name order; the log is not one."""
+def decision_files(decisions: Path) -> Iterator[tuple[Path, object]]:
+    """Each decision file and its parsed content, in file-name order; the log is not one."""
     for path in sorted(decisions.glob("*.yaml")):
         if path.name != REVIEWED:
-            yield yaml.safe_load(path.read_text(encoding="utf-8"))
+            yield path, yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def load_reviewed(path: Path) -> list[Reviewed]:
@@ -207,7 +181,7 @@ def load_reviewed(path: Path) -> list[Reviewed]:
 def course_names(decisions: Path) -> dict[str, str]:
     """Each decision's display course string, keyed by request id."""
     names: dict[str, str] = {}
-    for data in decision_files(decisions):
+    for _, data in decision_files(decisions):
         if isinstance(data, dict) and "request_id" in data:
             names[str(data["request_id"])] = str(data.get("course", ""))
     return names
@@ -303,54 +277,6 @@ def overlap_colour(percentage: int) -> str:
     return AMBER if percentage >= OVERLAP_FAIR else RED
 
 
-def warn(text: str) -> str:
-    return f'<span class="warn">{escape(text)}</span>'
-
-
-def pill(text: str, colour: str, tab: Tab | None = None, active: bool = True) -> str:
-    """A coloured badge; with `tab` it shows only while that tab is active."""
-    attrs = f'class="pill{" active" if tab and active else ""}"'
-    if tab:
-        attrs += f' data-tab="{tab}"'
-    return f'<span {attrs} style="background:{colour}">{escape(text)}</span>'
-
-
-def label(text: str) -> str:
-    return f'<div class="label">{escape(text)}</div>'
-
-
-def bullet_list(title: str, values: Iterable[str]) -> list[str]:
-    items = [f"<li>{escape(v)}</li>" for v in values]
-    return [label(title), "<ul>", *items, "</ul>"] if items else []
-
-
-def pane(tab: Tab, verdict: str | None, comment: str, note: str = "", *, badge: str = "") -> str:
-    """One tab's content: the Decision line, an optional badge and note, the comment and its tools.
-
-    `verdict` is ready-made HTML for the Decision line. Recommended is shown and
-    selected initially. A pane without a verdict (a fallback with none) reads
-    "No fallback" and cannot be selected. The Select button's text and disabled
-    state follow the selection; `choose` in the hook swaps them.
-    """
-    first = tab == "recommended"
-    parts = [f'<section class="pane{" active selected" if first else ""}" data-tab="{tab}">']
-    parts.append(f"<p><b>Decision:</b> {verdict}</p>" if verdict else "<p>No fallback</p>")
-    if badge:
-        parts.append(f"<p>{badge}</p>")
-    if note:
-        parts.append(f"<p>{escape(note)}</p>")
-    if verdict:
-        text, attrs = ("Selected", " disabled") if first else ("Select", "")
-        parts += [
-            f'<div class="comment">{escape(comment)}</div>',
-            '<p class="tools"><button type="button" class="reset">Reset comment</button>',
-            f'<button type="button" class="select"{attrs}>{text}</button>',
-            '<span class="modified" hidden>modified</span></p>',
-        ]
-    parts.append("</section>")
-    return "".join(parts)
-
-
 def panel_html(
     item: Item,
     progress: Progress,
@@ -360,85 +286,21 @@ def panel_html(
     existing: str | None = None,
     courses: Mapping[str, str] | None = None,
 ) -> str:
-    """The reviewer's panel, rendered into a shadow root; every value is HTML-escaped."""
-    decision, request = item.decision, item.request
-    courses = courses or {}
-    latest: dict[str, Reviewed] = {}
-    for entry in log:
-        if entry.action != "skip":
-            latest[entry.request_id] = entry
-    verdict, fallback = display(decision.verdict), decision.fallback_verdict
-    badges = [pill(verdict, VERDICT_COLOURS[decision.verdict], "recommended")]
-    if fallback:
-        badges.append(pill(display(fallback), VERDICT_COLOURS[fallback], "fallback", active=False))
-    badges.append(
-        pill(f"{decision.overlap_percentage}% Overlap", overlap_colour(decision.overlap_percentage))
+    """The reviewer's panel from `templates/panel.html`; every value is HTML-escaped."""
+    decision = item.decision
+    return PANEL.render(
+        decision=decision,
+        request=item.request,
+        progress=progress,
+        done=round(100 * progress.position / progress.total) if progress.total else 0,
+        dry_run=dry_run,
+        existing=(existing or "").strip(),
+        courses=courses or {},
+        latest={entry.request_id: entry for entry in log if entry.action != "skip"},
+        verdict_colours=VERDICT_COLOURS,
+        confidence_colours=CONFIDENCE_COLOURS,
+        overlap_colour=overlap_colour(decision.overlap_percentage),
     )
-    confidence = pill(
-        f"{display(decision.decision_confidence)} Confidence",
-        CONFIDENCE_COLOURS[decision.decision_confidence],
-    )
-    done = round(100 * progress.position / progress.total) if progress.total else 0
-    caption = (
-        f"{progress.position} of {progress.total} this session &middot; "
-        f"{progress.submitted} of {progress.requests} overall"
-    )
-    parts = [
-        f"<style>{PANEL_CSS}</style>",
-        "<header>",
-        f'<div class="badges">{"".join(badges)}</div>',
-        f'<div class="course">{escape(decision.course)}</div>',
-        f'<div class="bar"><span style="width:{done}%"></span></div>',
-        f'<div class="progress"><span>{caption}</span>',
-        warn("Dry run: action buttons disabled, only Skip advances") if dry_run else "",
-        "</div></header>",
-        '<div id="body">',
-    ]
-    parts += [
-        '<nav class="tabs">',
-        '<button type="button" class="tab active" data-tab="recommended">Recommended</button>',
-        '<button type="button" class="tab" data-tab="fallback">Fallback</button>',
-        "</nav>",
-        pane("recommended", escape(verdict), decision.comment, badge=confidence),
-        pane(
-            "fallback",
-            escape(display(fallback)) if fallback else None,
-            decision.fallback_comment or "",
-            decision.fallback_rationale or "",
-        ),
-    ]
-    if existing and existing.strip():
-        parts += [
-            label("Previous comments"),
-            f'<div class="comment">{escape(existing.strip())}</div>',
-        ]
-    if decision.remap_target or decision.remap_analysis:
-        parts.append(label("Remap"))
-        if decision.remap_target:
-            parts.append(f"<p><b>Target:</b> {escape(decision.remap_target)}</p>")
-        if decision.remap_analysis:
-            parts.append(f"<p>{escape(decision.remap_analysis)}</p>")
-    parts += bullet_list("Concerns", decision.concerns)
-    parts += bullet_list("Overlap", decision.overlap)
-    parts += bullet_list("Missing from PU", decision.missing_from_pu)
-    parts += bullet_list("Extra in PU", decision.extra_in_pu)
-    if request.related_request_ids:
-        parts += [label("Siblings (many-to-one)"), "<ul>"]
-        for sibling in request.related_request_ids:
-            logged = latest.get(sibling)
-            status = escape(logged.action) if logged else "not yet submitted"
-            if logged and logged.action != decision.verdict:
-                status += " " + warn("different action")
-            parts.append(f"<li>{escape(courses.get(sibling, sibling))}: {status}</li>")
-        parts.append("</ul>")
-    parts += [
-        "</div>",
-        "<footer>",
-        '<input type="text" id="reason" placeholder="Skip reason (optional)">',
-        '<button type="button" id="skip">Skip this request</button>',
-        "</footer>",
-    ]
-    return "".join(parts)
 
 
 def review_item(

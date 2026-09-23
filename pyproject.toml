@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "beautifulsoup4>=4.12,<5",
+    "Jinja2>=3.1,<4",
     "PyYAML>=6,<7",
     "playwright>=1.40,<2",
+    "pydantic>=2.7,<3",
     "pypdf>=4,<7",
 ]
 
@@ -25,7 +27,7 @@ edurec-mappings = "edurec_mappings.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-edurec_mappings = ["terms.yaml"]
+edurec_mappings = ["terms.yaml", "page.js", "templates/*"]
 
 [tool.ruff]
 line-length = 100
@@ -33,7 +35,7 @@ target-version = "py310"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "N", "RUF", "PL", "C4"]
+select = ["E", "F", "I", "UP", "B", "SIM", "N", "RUF", "PL", "C4", "ANN"]
 ignore = ["PLR0913", "PLR2004"]
 
 [tool.ruff.lint.per-file-ignores]
@@ -44,12 +46,6 @@ python_version = "3.10"
 strict = true
 files = ["src", "tests"]
 warn_unreachable = true
-
-[[tool.mypy.overrides]]
-module = ["tests.*"]
-disallow_untyped_defs = false
-disallow_untyped_calls = false
-check_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

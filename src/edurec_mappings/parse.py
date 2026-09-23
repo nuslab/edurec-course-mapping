@@ -22,7 +22,6 @@ from .models import (
     PartnerCourse,
     Request,
     Student,
-    as_dict,
     plain,
 )
 
@@ -34,17 +33,14 @@ DETAIL = "N_EXSP_MOD_DT_TRNSFR_EQVLNCY_GRP$0"
 T = TypeVar("T")
 
 
-def clean(value: str) -> str | None:
-    value = value.replace("\xa0", " ").strip()
+def text(node: PageElement | None) -> str | None:
+    """The node's text without padding; None when it is absent, blank or EduRec's "-"."""
+    value = node.get_text().replace("\xa0", " ").strip() if node else ""
     return value if value and value != "-" else None
 
 
-def text(node: PageElement | None) -> str | None:
-    return clean(node.get_text()) if node else None
-
-
-def digest(value: object) -> str:
-    return hashlib.sha256(json.dumps(plain(value), sort_keys=True).encode()).hexdigest()[:24]
+def digest(value: dict[str, object]) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
 
 
 def expand_action(soup: BeautifulSoup) -> str | None:
@@ -113,7 +109,7 @@ def detail(soup: BeautifulSoup) -> Request:
         mapping_number=required("mapping number", field("TRNSFR_EQVLNCY_GRP")),
         sequence=required("sequence", field("TRNSFR_EQVLNCY_SEQ")),
     )
-    key = as_dict(identity)
+    key = plain(identity)
     group_key = {k: v for k, v in key.items() if k != "sequence"}
     supporting_url = field("N_URL")
     return Request(

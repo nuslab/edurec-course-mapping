@@ -3,21 +3,27 @@ import unittest
 from pathlib import Path
 
 import yaml
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
-from edurec_mappings.models import LIST_COLUMNS
+from edurec_mappings.models import LIST_COLUMNS, plain
 from edurec_mappings.parse import GRID, detail, listing
 from edurec_mappings.store import document, reset, save
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def fixture(name):
+def fixture(name: str) -> BeautifulSoup:
     return BeautifulSoup((FIXTURES / name).read_text(), "html.parser")
 
 
+def tag(soup: BeautifulSoup, element_id: str, name: str | None = None) -> Tag:
+    found = soup.find(name, id=element_id)
+    assert isinstance(found, Tag)
+    return found
+
+
 class ExtractionTests(unittest.TestCase):
-    def test_list_pagination_and_actual_actions(self):
+    def test_list_pagination_and_actual_actions(self) -> None:
         result = listing(fixture("main.html"))
         self.assertEqual(result.range, (1, 100, 300))
         self.assertEqual(len(result.rows), 100)
@@ -28,7 +34,7 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(result.rows[0].nus_number, "3243")
         self.assertEqual(result.rows[0].partner_number, "1001")
 
-    def test_full_detail_and_missing_values(self):
+    def test_full_detail_and_missing_values(self) -> None:
         result = detail(fixture("individual.html"))
         partner = result.partner_course
         self.assertEqual(partner.title, "Artificial Intelligence")
@@ -44,33 +50,33 @@ class ExtractionTests(unittest.TestCase):
         self.assertTrue(result.many_to_one)
         self.assertEqual(result.status, "Pending Approval")
 
-    def test_group_identity_uses_student_and_not_sequence(self):
+    def test_group_identity_uses_student_and_not_sequence(self) -> None:
         soup = fixture("individual.html")
-        soup.find(id="N_EXSP_WKST_HDR_EMPLID").string = "TEST_STUDENT_A"
+        tag(soup, "N_EXSP_WKST_HDR_EMPLID").string = "TEST_STUDENT_A"
         first = detail(soup)
-        soup.find(id="N_EXSP_MOD_DT_TRNSFR_EQVLNCY_SEQ$0").string = "2"
+        tag(soup, "N_EXSP_MOD_DT_TRNSFR_EQVLNCY_SEQ$0").string = "2"
         second = detail(soup)
         self.assertEqual(first.group_id, second.group_id)
         self.assertNotEqual(first.request_id, second.request_id)
-        soup.find(id="N_EXSP_WKST_HDR_EMPLID").string = "TEST_STUDENT_B"
+        tag(soup, "N_EXSP_WKST_HDR_EMPLID").string = "TEST_STUDENT_B"
         third = detail(soup)
         self.assertNotEqual(first.group_id, third.group_id)
 
-    def test_request_id_ignores_editable_content(self):
+    def test_request_id_ignores_editable_content(self) -> None:
         soup = fixture("individual.html")
         first = detail(soup)
-        soup.find(id="N_EXSP_MOD_DT_N_MOD_COMMENTS$0").string = "Reviewer added a comment"
-        soup.find(id="N_EXSP_MOD_DT_N_URL$0").string = "https://example.org/new-syllabus"
+        tag(soup, "N_EXSP_MOD_DT_N_MOD_COMMENTS$0").string = "Reviewer added a comment"
+        tag(soup, "N_EXSP_MOD_DT_N_URL$0").string = "https://example.org/new-syllabus"
         second = detail(soup)
         self.assertEqual((first.request_id, first.group_id), (second.request_id, second.group_id))
 
-    def test_missing_identity_is_rejected(self):
+    def test_missing_identity_is_rejected(self) -> None:
         soup = fixture("individual.html")
-        soup.find(id="N_EXSP_WKST_HDR_EMPLID").string = ""
+        tag(soup, "N_EXSP_WKST_HDR_EMPLID").string = ""
         with self.assertRaisesRegex(ValueError, "student ID"):
             detail(soup)
 
-    def test_run_directory_layout_and_no_session_tokens(self):
+    def test_run_directory_layout_and_no_session_tokens(self) -> None:
         data = document()
         data.requests.append(detail(fixture("individual.html")))
         with tempfile.TemporaryDirectory() as directory:
@@ -85,7 +91,7 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual(path.name, f"{data.requests[0].request_id}.yaml")
             content = path.read_text()
             result = yaml.safe_load(content)
-            self.assertEqual(result, data.requests[0].to_dict())
+            self.assertEqual(result, plain(data.requests[0]))
             self.assertNotIn("ICSID", content)
             self.assertNotIn("&id", content, "Records must not be emitted as YAML aliases")
             self.assertEqual(result["related_request_ids"], [])
@@ -95,7 +101,7 @@ class ExtractionTests(unittest.TestCase):
                 {"method", "weight_percent", "remark"},
             )
 
-    def test_reset_clears_a_previous_run_only(self):
+    def test_reset_clears_a_previous_run_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run"
             (run / "requests").mkdir(parents=True)
@@ -107,7 +113,7 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual({p.name for p in run.iterdir()}, {"decisions"})
             reset(run / "missing")
 
-    def test_wrong_page_is_rejected(self):
+    def test_wrong_page_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             detail(fixture("main.html"))
         with self.assertRaises(ValueError):
@@ -118,7 +124,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def test_single_row_counter_has_no_range_dash():
+def test_single_row_counter_has_no_range_dash() -> None:
     html = (
         '<div id="win0divPTS_CFG_CL_STD_RSLGP$0"><span class="PSGRIDCOUNTER">1 of 1</span></div>'
         f'<table id="{GRID}"><tr onclick="x(\'#ICRow0\')">' + "<td>a</td>" * 14 + "</tr></table>"
@@ -129,7 +135,7 @@ def test_single_row_counter_has_no_range_dash():
 
 
 class ListColumnsTests(unittest.TestCase):
-    def test_columns_follow_the_grid_order(self):
+    def test_columns_follow_the_grid_order(self) -> None:
         # `listing` zips cells with LIST_COLUMNS, so ListRow's field order is the grid's.
         self.assertEqual(
             LIST_COLUMNS,

@@ -2,8 +2,10 @@ import argparse
 import copy
 import tempfile
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import yaml
@@ -13,26 +15,27 @@ from edurec_mappings.anonymize import anonymize, anonymized_path
 from edurec_mappings.browser import EduRec, subdivide
 from edurec_mappings.cli import configured_terms, optional_rows, parse_args, term_code
 from edurec_mappings.documents import MAX_TEXT_BYTES, scrape
-from edurec_mappings.export import Checkpoint, export
-from edurec_mappings.models import Fetched, Listing, ListRow, Partition
+from edurec_mappings.export import checkpoint, export
+from edurec_mappings.models import Fetched, Listing, ListRow, Partition, Request, plain
 from edurec_mappings.parse import detail, digest
 from edurec_mappings.store import save
-from tests.test_parse import fixture
+from tests.test_parse import fixture, tag
 
 
-def inventory(run):
-    return yaml.safe_load((run / "inventory.yaml").read_text())
+def inventory(run: Path) -> dict[str, Any]:
+    data: dict[str, Any] = yaml.safe_load((run / "inventory.yaml").read_text())
+    return data
 
 
-def saved_requests(run):
+def saved_requests(run: Path) -> dict[str, Any]:
     return {
         path.stem: yaml.safe_load(path.read_text()) for path in (run / "requests").glob("*.yaml")
     }
 
 
-def records():
+def records() -> list[tuple[ListRow, Request]]:
     template = detail(fixture("individual.html"))
-    result = []
+    result: list[tuple[ListRow, Request]] = []
     # A capped term, a second term, repeated student IDs, mixed reassignees,
     # and more than one page of matching rows exercise subdivision and limits.
     for i, term in enumerate(["2600"] * 7 + ["2610"] * 3):
@@ -51,7 +54,7 @@ def records():
         request.identity = replace(
             request.identity, student_id=student, term=term, mapping_number=str(i), sequence="1"
         )
-        request.request_id = digest(request.identity)
+        request.request_id = digest(plain(request.identity))
         request.group_id = request.request_id
         request.term_code = row.term_code
         request.reassigned_to = row.reassigned_to
@@ -59,32 +62,41 @@ def records():
     return result
 
 
+def within(partition: Partition, r: ListRow, d: Request) -> bool:
+    assert r.term_code is not None and r.student_id is not None
+    return (
+        partition.term_low <= int(r.term_code) <= partition.term_high
+        and (partition.student_low is None or r.student_id >= partition.student_low)
+        and (partition.student_high is None or r.student_id <= partition.student_high)
+        and partition.group_low <= int(d.identity.mapping_number) <= partition.group_high
+        and partition.sequence_low <= int(d.identity.sequence) <= partition.sequence_high
+    )
+
+
 class FakeSite:
-    def __init__(self, entries=None, cap=4, page_size=2, fail_after=None):
+    def __init__(
+        self,
+        entries: list[tuple[ListRow, Request]] | None = None,
+        cap: int = 4,
+        page_size: int = 2,
+        fail_after: int | None = None,
+    ) -> None:
         self.entries = entries if entries is not None else records()
         self.cap = cap
         self.page_size = page_size
-        self.searches = []
+        self.searches: list[Partition] = []
         self.opened = 0
         self.fail_after = fail_after
 
-    def search(self, partition):
+    def search(self, partition: Partition) -> Listing:
         self.searches.append(partition)
-        self.matches = [
-            (r, d)
-            for r, d in self.entries
-            if partition.term_low <= int(r.term_code) <= partition.term_high
-            and (partition.student_low is None or r.student_id >= partition.student_low)
-            and (partition.student_high is None or r.student_id <= partition.student_high)
-            and partition.group_low <= int(d.identity.mapping_number) <= partition.group_high
-            and partition.sequence_low <= int(d.identity.sequence) <= partition.sequence_high
-        ]
+        self.matches = [(r, d) for r, d in self.entries if within(partition, r, d)]
         self.capped = len(self.matches) >= self.cap
         self.matches = self.matches[: self.cap]
         self.offset = 0
         return self.read_list()
 
-    def read_list(self):
+    def read_list(self) -> Listing:
         page = self.matches[self.offset : self.offset + self.page_size]
         return Listing(
             rows=[r for r, _ in page],
@@ -95,24 +107,24 @@ class FakeSite:
             has_next=self.offset + len(page) < len(self.matches),
         )
 
-    def next_page(self):
+    def next_page(self) -> Listing:
         self.offset += self.page_size
         return self.read_list()
 
-    def request(self, row):
+    def request(self, row: ListRow) -> Request:
         if self.fail_after is not None and self.opened >= self.fail_after:
             raise RuntimeError("Simulated lost session")
         self.opened += 1
         return copy.deepcopy(next(d for r, d in self.matches if r.action == row.action))
 
-    def back(self):
+    def back(self) -> Listing:
         return self.read_list()
 
 
 class ExportTests(unittest.TestCase):
-    def test_return_to_first_page_recovers_pagination(self):
+    def test_return_to_first_page_recovers_pagination(self) -> None:
         class ResetOnBack(FakeSite):
-            def back(self):
+            def back(self) -> Listing:
                 self.offset = 0
                 return self.read_list()
 
@@ -121,7 +133,7 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(len(data.requests), 10)
             self.assertEqual(data.collection.status, "complete")
 
-    def test_blank_term_uses_configured_terms_and_explicit_term_overrides(self):
+    def test_blank_term_uses_configured_terms_and_explicit_term_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "terms.yaml"
             path.write_text("terms: [2610, 2620]\n")
@@ -135,7 +147,7 @@ class ExportTests(unittest.TestCase):
             override = export(FakeSite(cap=100), Path(directory) / "override", terms=["2600"])
             self.assertEqual(len(override.requests), 7)
 
-    def test_invalid_term_configuration(self):
+    def test_invalid_term_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "terms.yaml"
             for config in (
@@ -149,7 +161,7 @@ class ExportTests(unittest.TestCase):
                 with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
                     configured_terms(path)
 
-    def test_reusing_between_operator_does_not_trigger_form_rebuild(self):
+    def test_reusing_between_operator_does_not_trigger_form_rebuild(self) -> None:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             context = browser.new_context()
@@ -168,7 +180,7 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(site.control("STRM$to").input_value(), "2619")
             browser.close()
 
-    def test_leaving_between_operator_waits_for_form_rebuild(self):
+    def test_leaving_between_operator_waits_for_form_rebuild(self) -> None:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             context = browser.new_context()
@@ -183,7 +195,11 @@ class ExportTests(unittest.TestCase):
             site = EduRec(context)
             transitions = []
 
-            def fake_transition(action, trigger=None, target=None):
+            def fake_transition(
+                action: str,
+                trigger: Callable[[], object] | None = None,
+                target: str | None = None,
+            ) -> None:
                 transitions.append((action, target))
                 if trigger:
                     trigger()
@@ -194,9 +210,9 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(site.control("EMPLID").input_value(), "A0000500X")
             browser.close()
 
-    def test_search_switches_grid_to_view_100(self):
+    def test_search_switches_grid_to_view_100(self) -> None:
         listing = fixture("main.html")
-        listing.find("a", id="PTS_CFG_CL_STD_RSL$hviewall$0").string = "View 100"
+        tag(listing, "PTS_CFG_CL_STD_RSL$hviewall$0", "a").string = "View 100"
         for script in listing.find_all("script"):
             script.decompose()
         with sync_playwright() as p:
@@ -237,9 +253,9 @@ class ExportTests(unittest.TestCase):
             )
             browser.close()
 
-    def test_stale_search_results_are_rejected(self):
+    def test_stale_search_results_are_rejected(self) -> None:
         class StaleSite(FakeSite):
-            def search(self, partition):
+            def search(self, partition: Partition) -> Listing:
                 return super().search(Partition())
 
         with tempfile.TemporaryDirectory() as directory:
@@ -248,7 +264,7 @@ class ExportTests(unittest.TestCase):
                 export(StaleSite(cap=100), path, terms=["2610"])
             self.assertFalse(inventory(path)["collection"]["all_request_details_collected"])
 
-    def test_all_terms_and_all_pages_beyond_cap_without_duplicates(self):
+    def test_all_terms_and_all_pages_beyond_cap_without_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             site = FakeSite()
             data = export(site, Path(directory) / "all")
@@ -261,7 +277,7 @@ class ExportTests(unittest.TestCase):
                 any(p.status == "subdivided" for p in data.collection.search_partitions)
             )
 
-    def test_reassign_exact_case_insensitive_and_global_limit(self):
+    def test_reassign_exact_case_insensitive_and_global_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data = export(
                 FakeSite(cap=100), Path(directory) / "limited", reassign_id="owner", rows=3
@@ -272,39 +288,37 @@ class ExportTests(unittest.TestCase):
             self.assertFalse(data.collection.all_request_details_collected)
             self.assertEqual(data.collection.scanned_rows, 5)
 
-    def test_term_filter_and_yaml_roundtrip(self):
+    def test_term_filter_and_yaml_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "term"
             data = export(FakeSite(), path, terms=["2610"])
             self.assertEqual(len(data.requests), 3)
             self.assertTrue(all(r.identity.term == "2610" for r in data.requests))
             self.assertEqual(inventory(path), data.inventory())
-            self.assertEqual(
-                saved_requests(path), {r.request_id: r.to_dict() for r in data.requests}
-            )
+            self.assertEqual(saved_requests(path), {r.request_id: plain(r) for r in data.requests})
             self.assertFalse((path / "documents").exists())
             self.assertEqual(data.collection.linked_documents, "skipped")
             self.assertTrue(all(r.linked_documents is None for r in data.requests))
 
-    def test_scrape_stage_writes_documents_once_and_caps_their_size(self):
+    def test_scrape_stage_writes_documents_once_and_caps_their_size(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scraped"
             data = export(FakeSite(), path, terms=["2610"])
             data.requests[0].comments = "see https://example.org/textbook.pdf"
             calls = []
 
-            def fetch(url):
+            def fetch(url: str) -> Fetched:
                 calls.append(url)
                 if url.endswith("textbook.pdf"):
-                    return 200, "text/plain", b"x" * (MAX_TEXT_BYTES + 1)
-                return 200, "text/plain", b"Week 1: search"
+                    return Fetched(200, "text/plain", b"x" * (MAX_TEXT_BYTES + 1))
+                return Fetched(200, "text/plain", b"Week 1: search")
 
-            scrape(data, fetch, Checkpoint(data, path))
+            scrape(data, fetch, checkpoint(data, path))
             self.assertEqual(len(calls), 2, "The shared supporting URL is fetched once")
             self.assertEqual(data.collection.linked_documents, "fetched_when_present")
             self.assertEqual(inventory(path), data.inventory())
             saved = saved_requests(path)
-            self.assertEqual(saved, {r.request_id: r.to_dict() for r in data.requests})
+            self.assertEqual(saved, {r.request_id: plain(r) for r in data.requests})
             (text_file,) = (path / "documents").iterdir()
             self.assertEqual(text_file.read_text(), "Week 1: search")
             for request in saved.values():
@@ -321,17 +335,17 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(textbook["bytes"], MAX_TEXT_BYTES + 1)
             self.assertIn("exceeds", textbook["error"])
 
-    def test_anonymize_stage_writes_a_separate_pseudonymised_copy(self):
+    def test_anonymize_stage_writes_a_separate_pseudonymised_copy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "raw"
             data = export(FakeSite(cap=100), path)
             for page in data.list_pages:
                 for row in page.rows:
                     row.student_name, row.user_id = "Real Name", "E123"
-            scrape(data, lambda url: Fetched(200, "text/plain", b"Outline"), Checkpoint(data, path))
-            original = copy.deepcopy(data.to_dict())
+            scrape(data, lambda url: Fetched(200, "text/plain", b"Outline"), checkpoint(data, path))
+            original = copy.deepcopy(plain(data))
             anonymized = anonymize(data)
-            self.assertEqual(data.to_dict(), original, "The source export must not change")
+            self.assertEqual(plain(data), original, "The source export must not change")
             copy_path = Path(directory) / "raw-anonymized"
             save(anonymized, copy_path)
             self.assertEqual(inventory(copy_path)["collection"]["anonymized"], True)
@@ -342,7 +356,7 @@ class ExportTests(unittest.TestCase):
             )
             self.assertTrue(anonymized.collection.anonymized)
             self.assertFalse(data.collection.anonymized)
-            text = yaml.safe_dump(anonymized.to_dict())
+            text = yaml.safe_dump(plain(anonymized))
             for real in {r.identity.student_id for r in data.requests} | {"Real Name", "E123"}:
                 self.assertNotIn(real, text)
             ids = {r.identity.student_id for r in anonymized.requests}
@@ -363,7 +377,7 @@ class ExportTests(unittest.TestCase):
                 Path("../edurec-data/output/module-mappings-anonymized"),
             )
 
-    def test_stage_flags_and_anonymized_run_default(self):
+    def test_stage_flags_and_anonymized_run_default(self) -> None:
         args = parse_args(["export", "--run", "out/x"])
         self.assertFalse(args.scrape_urls)
         self.assertFalse(args.anonymize)
@@ -374,7 +388,7 @@ class ExportTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parse_args(["export", "--run", "x", "--anonymized-run", "./x"])
 
-    def test_single_student_capped_search_splits_mapping_groups(self):
+    def test_single_student_capped_search_splits_mapping_groups(self) -> None:
         entries = records()[:7]
         for row, request in entries:
             row.student_id = "ONE_STUDENT"
@@ -385,14 +399,14 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(len(data.requests), 7)
             self.assertTrue(any(p.group_low != 0 or p.group_high != 999 for p in site.searches))
 
-    def test_empty_and_no_matching_reassignee_complete(self):
+    def test_empty_and_no_matching_reassignee_complete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             for site in (FakeSite([]), FakeSite(cap=100)):
                 data = export(site, Path(directory) / "empty", reassign_id="MISSING")
                 self.assertEqual(data.requests, [])
                 self.assertEqual(data.collection.status, "complete")
 
-    def test_interruption_retains_details_and_incomplete_status(self):
+    def test_interruption_retains_details_and_incomplete_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interrupted"
             with self.assertRaisesRegex(RuntimeError, "lost session"):
@@ -402,7 +416,7 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(data["collection"]["status"], "interrupted")
             self.assertFalse(data["collection"]["all_request_details_collected"])
 
-    def test_rerun_into_the_same_directory_replaces_the_previous_export(self):
+    def test_rerun_into_the_same_directory_replaces_the_previous_export(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rerun"
             export(FakeSite(), path)
@@ -410,12 +424,12 @@ class ExportTests(unittest.TestCase):
             export(FakeSite(), path, terms=["2610"])
             self.assertEqual(len(saved_requests(path)), 3)
 
-    def test_indivisible_cap_fails_instead_of_claiming_complete(self):
+    def test_indivisible_cap_fails_instead_of_claiming_complete(self) -> None:
         p = Partition(2600, 2600, "A", "A", 1, 1, 1, 1)
         with self.assertRaisesRegex(RuntimeError, "indivisible"):
             subdivide(p, [ListRow(term_code="2600", student_id="A", action="#ICRow0")])
 
-    def test_blank_arguments_and_invalid_limits(self):
+    def test_blank_arguments_and_invalid_limits(self) -> None:
         self.assertIsNone(optional_rows(""))
         self.assertEqual(optional_rows("12"), 12)
         self.assertEqual(term_code(""), "")

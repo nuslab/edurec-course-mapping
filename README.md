@@ -15,11 +15,13 @@ edurec-mappings/
 │   ├── cli.py                # argument parsing, login prompt, browser lifecycle
 │   ├── export.py             # cap-aware search loop with YAML checkpoints
 │   ├── browser.py            # EduRec navigation (search form, paging, detail, View 100)
-│   ├── models.py             # dataclasses for rows, requests, linked documents and the export
+│   ├── page.js               # scripts run in the EduRec frame: settle waits, review panel hook
+│   ├── models.py             # typed dataclasses for the export and decisions; YAML (de)serialisation
 │   ├── parse.py              # list/detail HTML parsing into those records
 │   ├── documents.py          # download and text extraction of URLs in course details
 │   ├── anonymize.py          # pseudonymised copy of an export
 │   ├── review.py             # reviewer walk-through of the decisions, with reviewed.yaml log
+│   ├── templates/            # Jinja2 review panel (panel.html) and its stylesheet (panel.css)
 │   └── terms.yaml            # terms searched when --term is blank
 └── tests/                    # unittest suite; fixtures/ holds trimmed EduRec pages
 
@@ -264,11 +266,17 @@ Run before considering any change done; all four must pass:
 ruff format . && ruff check --fix . && mypy && pytest
 ```
 
-The code is fully type-annotated and checked with `mypy --strict`. Records are
+The code, tests included, is fully type-annotated (ruff's `ANN` rules) and
+checked with `mypy --strict`. Records are
 dataclasses in `models.py`: the request records hold what a mapping decision
 needs, the collection records hold the extraction audit, and `Decision` mirrors
-one `decisions/<request_id>.yaml` file as `.claude/agents/course-mapping.md` specifies it. `Document.to_dict()` and
-`Request.to_dict()` produce the plain dictionaries written to YAML.
+one `decisions/<request_id>.yaml` file as `.claude/agents/course-mapping.md` specifies it. `plain`
+turns a record into the dictionary written to YAML (`Document.inventory()` is the
+export without its requests) and `hydrate` reads one back. Both go through a
+pydantic `TypeAdapter`; loading is strict, as for JSON: no type coercion, no
+unknown keys, and no YAML-only values such as unquoted timestamps. A malformed
+decision file stops the review with an error naming the file. Old data is
+migrated when the schema changes, not accepted by the loader.
 
 Tests parse the trimmed pages in `tests/fixtures/` and drive local headless
 browsers with intercepted requests for search operators, the View 100 switch

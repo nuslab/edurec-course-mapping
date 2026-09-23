@@ -181,7 +181,7 @@ def fetch_documents(
     fetch: Fetcher,
     cache: dict[str, LinkedDocument] | None = None,
     render: Renderer | None = None,
-) -> Request:
+) -> None:
     """Attach `linked_documents` to the request in place."""
     cache = cache if cache is not None else {}
     documents: list[LinkedDocument] = []
@@ -194,7 +194,6 @@ def fetch_documents(
     if partner.supporting_url:
         supporting = next((d for d in documents if d.url == partner.supporting_url), None)
         partner.supporting_document_status = supporting.status if supporting else "not_fetched"
-    return request
 
 
 def scrape(

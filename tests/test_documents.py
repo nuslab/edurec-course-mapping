@@ -1,16 +1,17 @@
 import io
 import unittest
+from typing import NoReturn
 
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from edurec_mappings.documents import direct_url, document_name, fetch_documents, find_urls
-from edurec_mappings.models import LinkedDocument
+from edurec_mappings.models import Fetched, LinkedDocument
 from edurec_mappings.parse import detail, expand_action
-from tests.test_parse import fixture
+from tests.test_parse import fixture, tag
 
 
-def pdf_bytes(text):
+def pdf_bytes(text: str) -> bytes:
     writer = PdfWriter()
     page = writer.add_blank_page(width=200, height=200)
 
@@ -33,7 +34,7 @@ def pdf_bytes(text):
 
 
 class DocumentTests(unittest.TestCase):
-    def test_urls_found_in_detail_fields_without_duplicates(self):
+    def test_urls_found_in_detail_fields_without_duplicates(self) -> None:
         request = detail(fixture("individual.html"))
         partner = request.partner_course
         partner.syllabus = (partner.syllabus or "") + (
@@ -63,24 +64,24 @@ class DocumentTests(unittest.TestCase):
             "https://drive.google.com/drive/folders/xyz",
         )
 
-    def test_pdf_html_and_failures_are_recorded(self):
+    def test_pdf_html_and_failures_are_recorded(self) -> None:
         request = detail(fixture("individual.html"))
         request.partner_course.other_information = (
             "https://example.org/page https://example.org/missing"
         )
         calls = []
 
-        def fetch(url):
+        def fetch(url: str) -> Fetched:
             calls.append(url)
             if "dropbox" in url:
-                return 200, "application/pdf", pdf_bytes("Syllabus week one")
+                return Fetched(200, "application/pdf", pdf_bytes("Syllabus week one"))
             if url.endswith("/page"):
-                return (
+                return Fetched(
                     200,
                     "text/html; charset=utf-8",
                     b"<html><head><title>T</title><script>x()</script></head><body><p>Outline</p></body></html>",
                 )
-            return 404, "text/html", b"gone"
+            return Fetched(404, "text/html", b"gone")
 
         cache: dict[str, LinkedDocument] = {}
         fetch_documents(request, fetch, cache)
@@ -98,10 +99,10 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(len(calls), 3, "Cached URLs must not be fetched again")
         self.assertIsNot((request.linked_documents or [])[0], cache[docs[0].url])
 
-    def test_fetch_errors_never_abort_collection(self):
+    def test_fetch_errors_never_abort_collection(self) -> None:
         request = detail(fixture("individual.html"))
 
-        def fetch(url):
+        def fetch(url: str) -> NoReturn:
             raise ConnectionError("network down")
 
         fetch_documents(request, fetch)
@@ -109,19 +110,15 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual((document.status, document.error), ("failed", "network down"))
         self.assertEqual(request.partner_course.supporting_document_status, "failed")
 
-    def test_expand_action_only_when_larger_view_is_offered(self):
+    def test_expand_action_only_when_larger_view_is_offered(self) -> None:
         soup = fixture("main.html")
         self.assertIsNone(expand_action(soup), "Snapshot already shows 100 rows")
-        soup.find("a", id="PTS_CFG_CL_STD_RSL$hviewall$0").string = "View 100"
+        tag(soup, "PTS_CFG_CL_STD_RSL$hviewall$0", "a").string = "View 100"
         self.assertEqual(expand_action(soup), "PTS_CFG_CL_STD_RSL$hviewall$0")
-        soup.find("a", id="PTS_CFG_CL_STD_RSL$hviewall$0").string = "View All"
+        tag(soup, "PTS_CFG_CL_STD_RSL$hviewall$0", "a").string = "View All"
         self.assertEqual(expand_action(soup), "PTS_CFG_CL_STD_RSL$hviewall$0")
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-    def test_script_shells_are_rendered_when_a_renderer_is_given(self):
+    def test_script_shells_are_rendered_when_a_renderer_is_given(self) -> None:
         request = detail(fixture("individual.html"))
         request.partner_course.other_information = (
             "https://example.org/shell https://example.org/broken-shell https://example.org/full"
@@ -130,12 +127,12 @@ if __name__ == "__main__":
         full = b"<html><body>" + b"<p>Week one outline</p>" * 100 + b"</body></html>"
         rendered = []
 
-        def fetch(url):
+        def fetch(url: str) -> Fetched:
             if "dropbox" in url:
-                return 200, "application/pdf", pdf_bytes("Syllabus week one")
-            return 200, "text/html", full if url.endswith("/full") else shell
+                return Fetched(200, "application/pdf", pdf_bytes("Syllabus week one"))
+            return Fetched(200, "text/html", full if url.endswith("/full") else shell)
 
-        def render(url):
+        def render(url: str) -> bytes:
             rendered.append(url)
             if url.endswith("/broken-shell"):
                 raise TimeoutError("navigation timed out")
@@ -157,3 +154,7 @@ if __name__ == "__main__":
         broken = docs["broken-shell"]
         self.assertEqual((broken.status, broken.text), ("fetched", "Loading"))
         self.assertIn("Week one outline", docs["full"].text or "")
+
+
+if __name__ == "__main__":
+    unittest.main()

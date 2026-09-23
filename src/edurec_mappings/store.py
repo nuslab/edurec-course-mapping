@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import Collection, Document, MappingGroup, Request
+from .models import Collection, Document, MappingGroup, Request, plain
 
 INVENTORY = "inventory.yaml"
 REQUESTS = "requests"
@@ -75,5 +75,5 @@ def save(data: Document, directory: str | Path, requests: Iterable[Request] | No
         for linked in request.linked_documents or []:
             if linked.text is not None and linked.path and not (run / linked.path).exists():
                 write_atomic(run / linked.path, linked.text)
-        write_atomic(run / REQUESTS / f"{request.request_id}.yaml", dump(request.to_dict()))
+        write_atomic(run / REQUESTS / f"{request.request_id}.yaml", dump(plain(request)))
     write_atomic(run / INVENTORY, dump(data.inventory()))

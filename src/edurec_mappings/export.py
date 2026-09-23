@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -28,15 +29,12 @@ class Site(Protocol):
     def back(self) -> Listing: ...
 
 
-class Checkpoint:
-    """Rewrite the inventory and, when given, the one request that changed."""
+Checkpoint = Callable[[Request | None], None]
+"""Rewrite the inventory and, when given, the one request that changed."""
 
-    def __init__(self, data: Document, output: str | Path) -> None:
-        self.data = data
-        self.output = output
 
-    def __call__(self, request: Request | None = None) -> None:
-        save(self.data, self.output, [request] if request else [])
+def checkpoint(data: Document, output: str | Path) -> Checkpoint:
+    return lambda request: save(data, output, [request] if request else [])
 
 
 def restore_list(site: Site, current: Listing, total: int) -> Listing:
@@ -114,7 +112,7 @@ class Extraction:
         meta = self.data.collection
         if request.request_id in self.known:
             meta.duplicate_details += 1
-            self.checkpoint()
+            self.checkpoint(None)
             return
         self.known.add(request.request_id)
         self.data.requests.append(request)
@@ -141,8 +139,8 @@ def export(
         rows=rows,
     )
     reset(output)
-    checkpoint = Checkpoint(data, output)
-    run = Extraction(site, data, checkpoint, reassign_id, rows)
+    write = checkpoint(data, output)
+    run = Extraction(site, data, write, reassign_id, rows)
     queue = (
         [Partition(term_low=int(code), term_high=int(code)) for code in terms]
         if terms is not None
@@ -168,24 +166,24 @@ def export(
             if current.capped:
                 queue[0:0] = subdivide(partition, current.rows)
                 audit.status = "subdivided"
-                checkpoint()
+                write(None)
                 continue
             if run.scan(partition, current, audit):
                 audit.status = "row_limit_reached"
                 meta.status = "row_limit_reached"
                 meta.all_request_details_collected = False
-                checkpoint()
+                write(None)
                 return data
             audit.status = "complete"
-            checkpoint()
+            write(None)
         meta.status = "complete"
         meta.all_request_details_collected = True
         meta.related_mapping_completeness = "unverified"
-        checkpoint()
+        write(None)
         return data
     except BaseException as exc:
         meta.status = "interrupted"
         meta.error = str(exc) or type(exc).__name__
         meta.all_request_details_collected = False
-        checkpoint()
+        write(None)
         raise

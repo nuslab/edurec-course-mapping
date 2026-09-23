@@ -32,7 +32,7 @@ from .browser import (
     mapping_frame,
 )
 from .documents import html_text, playwright_fetcher, playwright_renderer, scrape
-from .export import Checkpoint, export
+from .export import checkpoint, export
 from .models import TERM_PATTERN, Verdict
 from .review import review
 from .store import reset, save
@@ -335,7 +335,7 @@ def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
         if args.scrape_urls:
             fetch = playwright_fetcher(context, args.timeout_ms)
             render = playwright_renderer(context, args.timeout_ms)
-            scrape(result, fetch, Checkpoint(result, args.run), render)
+            scrape(result, fetch, checkpoint(result, args.run), render)
             print(f"Linked documents added → {args.run}")
         if args.anonymize:
             reset(args.anonymized_run)

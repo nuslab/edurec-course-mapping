@@ -3,6 +3,7 @@
 import argparse
 import io
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
@@ -19,8 +20,8 @@ NOT_LOADED = ApprovalNotLoadedError(
 DUPLICATES = RuntimeError("Found 2 Course Mapping Approval frames.")
 
 
-def namespace(**overrides):
-    values = {
+def namespace(**overrides: object) -> argparse.Namespace:
+    values: dict[str, object] = {
         "ready": False,
         "cdp_url": None,
         "timeout": 60,
@@ -43,61 +44,62 @@ def namespace(**overrides):
     return argparse.Namespace(**values)
 
 
-def quietly(function, *args):
+def quietly(function: Callable[..., object], *args: object) -> str:
     with redirect_stdout(io.StringIO()) as out:
         function(*args)
     return out.getvalue()
 
 
 class AwaitApprovalTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.frame = self.patch("mapping_frame")
         self.open_component = self.patch("open_component")
         self.approval_ready = self.patch("approval_ready", return_value=False)
         self.context = mock.MagicMock()
         self.wait_for_enter = self.patch("wait_for_enter", return_value=True)
 
-    def patch(self, name, **kwargs):
-        patcher = mock.patch.object(cli, name, **kwargs)
+    def patch(self, name: str, return_value: object = mock.DEFAULT) -> mock.MagicMock:
+        patcher = mock.patch.object(cli, name, return_value=return_value)
         self.addCleanup(patcher.stop)
-        return patcher.start()
+        started: mock.MagicMock = patcher.start()
+        return started
 
-    def test_ready_with_form_present_does_not_navigate(self):
+    def test_ready_with_form_present_does_not_navigate(self) -> None:
         cli.await_approval(self.context, namespace(ready=True))
         self.open_component.assert_not_called()
 
-    def test_ready_opens_the_component_when_only_the_dashboard_is_up(self):
+    def test_ready_opens_the_component_when_only_the_dashboard_is_up(self) -> None:
         self.frame.side_effect = [NOT_LOADED, None]
         cli.await_approval(self.context, namespace(ready=True))
         self.open_component.assert_called_once_with(self.context, 60000)
         self.assertEqual(self.frame.call_count, 2)
 
-    def test_ready_propagates_other_frame_errors(self):
+    def test_ready_propagates_other_frame_errors(self) -> None:
         self.frame.side_effect = DUPLICATES
         with self.assertRaises(RuntimeError):
             cli.await_approval(self.context, namespace(ready=True))
         self.open_component.assert_not_called()
 
-    def test_detected_login_proceeds_without_enter(self):
+    def test_detected_login_proceeds_without_enter(self) -> None:
         self.approval_ready.return_value = True
         out = quietly(cli.await_approval, self.context, namespace())
         self.assertIn("Course Mapping Approval detected", out)
         self.wait_for_enter.assert_not_called()
 
-    def test_polls_until_enter_then_opens_the_component(self):
+    def test_polls_until_enter_then_opens_the_component(self) -> None:
         self.wait_for_enter.side_effect = [False, True]
         self.frame.side_effect = [NOT_LOADED, None]
         quietly(cli.await_approval, self.context, namespace())
         self.open_component.assert_called_once_with(self.context, 60000)
 
-    def test_failed_retry_keeps_waiting(self):
+    def test_failed_retry_keeps_waiting(self) -> None:
         self.approval_ready.side_effect = [False, True]
         self.frame.side_effect = DUPLICATES
         out = quietly(cli.await_approval, self.context, namespace())
         self.assertIn("Not ready: Found 2 Course Mapping Approval frames.", out)
         self.assertIn("Course Mapping Approval detected", out)
 
-    def test_navigation_error_on_retry_keeps_waiting(self):
+    def test_navigation_error_on_retry_keeps_waiting(self) -> None:
         self.approval_ready.side_effect = [False, True]
         self.frame.side_effect = NOT_LOADED
         self.open_component.side_effect = PlaywrightError("Timeout 60000ms exceeded.\ndetail")
@@ -106,24 +108,24 @@ class AwaitApprovalTests(unittest.TestCase):
 
 
 class ConnectTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         patcher = mock.patch.object(cli, "await_approval")
         self.await_approval = patcher.start()
         self.addCleanup(patcher.stop)
         self.context = mock.MagicMock()
         self.page = self.context.pages[0]
 
-    def test_attached_browser_is_not_navigated(self):
+    def test_attached_browser_is_not_navigated(self) -> None:
         args = namespace(cdp_url="http://localhost:9222")
         cli.connect(self.context, args)
         self.page.goto.assert_not_called()
         self.await_approval.assert_called_once_with(self.context, args)
 
-    def test_launched_browser_opens_the_component(self):
+    def test_launched_browser_opens_the_component(self) -> None:
         cli.connect(self.context, namespace())
         self.page.goto.assert_called_once_with(COMPONENT, timeout=60000)
 
-    def test_navigation_failure_is_left_to_the_user_unless_ready(self):
+    def test_navigation_failure_is_left_to_the_user_unless_ready(self) -> None:
         self.page.goto.side_effect = PlaywrightError("net::ERR_PROXY\nstack")
         out = quietly(cli.connect, self.context, namespace())
         self.assertIn("Initial navigation failed: net::ERR_PROXY\n", out)
@@ -133,8 +135,8 @@ class ConnectTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
-    def setUp(self):
-        self.mocks = {}
+    def setUp(self) -> None:
+        self.mocks: dict[str, mock.MagicMock] = {}
         for name in (
             "connect",
             "EduRec",
@@ -142,7 +144,7 @@ class RunTests(unittest.TestCase):
             "playwright_fetcher",
             "playwright_renderer",
             "scrape",
-            "Checkpoint",
+            "checkpoint",
             "reset",
             "save",
             "anonymize",
@@ -157,11 +159,11 @@ class RunTests(unittest.TestCase):
         result.collection.status, result.requests = "complete", [1, 2]
         self.context = mock.MagicMock()
 
-    def assert_dialog_hook_removed(self):
+    def assert_dialog_hook_removed(self) -> None:
         self.context.on.assert_called_once_with("dialog", cli.manual_dialog)
         self.context.remove_listener.assert_called_with("dialog", cli.manual_dialog)
 
-    def test_run_export_extracts_with_the_parsed_filters(self):
+    def test_run_export_extracts_with_the_parsed_filters(self) -> None:
         out = quietly(cli.run_export, self.context, namespace())
         self.mocks["EduRec"].assert_called_once_with(self.context, 60000)
         self.mocks["export"].assert_called_once_with(
@@ -176,7 +178,7 @@ class RunTests(unittest.TestCase):
         self.mocks["save"].assert_not_called()
         self.assert_dialog_hook_removed()
 
-    def test_run_scrapes_and_anonymizes_when_asked(self):
+    def test_run_scrapes_and_anonymizes_when_asked(self) -> None:
         quietly(cli.run_export, self.context, namespace(scrape_urls=True, anonymize=True))
         self.mocks["scrape"].assert_called_once()
         self.mocks["reset"].assert_called_once_with("run-anonymized")
@@ -184,7 +186,7 @@ class RunTests(unittest.TestCase):
             self.mocks["anonymize"].return_value, "run-anonymized"
         )
 
-    def test_run_holds_the_browser_open_on_error(self):
+    def test_run_holds_the_browser_open_on_error(self) -> None:
         self.mocks["export"].side_effect = RuntimeError("lost session")
         with self.assertRaises(RuntimeError):
             cli.run_export(self.context, namespace())
@@ -193,7 +195,7 @@ class RunTests(unittest.TestCase):
         )
         self.assert_dialog_hook_removed()
 
-    def test_run_review_passes_the_filters_and_reports_errors(self):
+    def test_run_review_passes_the_filters_and_reports_errors(self) -> None:
         args = namespace(request_ids=["r1"], verdicts=["approve"], dry_run=True)
         quietly(cli.run_review, self.context, args)
         self.mocks["Reviewer"].assert_called_once_with(self.context, 60000)
@@ -213,18 +215,18 @@ class RunTests(unittest.TestCase):
 
 
 class ParseArgsTests(unittest.TestCase):
-    def test_explicit_term_is_left_to_extract_and_blank_reads_the_configuration(self):
+    def test_explicit_term_is_left_to_extract_and_blank_reads_the_configuration(self) -> None:
         self.assertEqual(cli.parse_args(["export", "--term", "2610"]).terms, ["2610"])
         self.assertTrue(cli.parse_args(["export"]).terms)
 
-    def test_a_command_is_required(self):
+    def test_a_command_is_required(self) -> None:
         for argv in ([], ["--term", "2610"]):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 cli.parse_args(argv)
 
 
 class RenderTests(unittest.TestCase):
-    def test_fetch_prints_title_and_text_and_closes_the_browser(self):
+    def test_fetch_prints_title_and_text_and_closes_the_browser(self) -> None:
         html = b"<html><title>Syllabus</title><body><p>Week 1</p></body></html>"
         with (
             mock.patch.object(cli, "sync_playwright") as playwright,
@@ -238,27 +240,27 @@ class RenderTests(unittest.TestCase):
         browser.close.assert_called_once()
 
 
-def page(start, end, total, has_next=True, name="row"):
+def page(start: int, end: int, total: int, has_next: bool = True, name: str = "row") -> Listing:
     rows = [ListRow(action=f"#ICRow{i}", student_id=f"{name}{i}") for i in range(start, end + 1)]
     return Listing(rows=rows, range=(start, end, total), has_next=has_next)
 
 
 class RestoreListTests(unittest.TestCase):
-    def test_pages_forward_after_a_reset_to_page_one(self):
+    def test_pages_forward_after_a_reset_to_page_one(self) -> None:
         site = mock.Mock()
         site.back.return_value = page(1, 2, 4)
         site.next_page.return_value = page(3, 4, 4, has_next=False)
         restored = restore_list(site, page(3, 4, 4, has_next=False), 4)
         self.assertEqual(restored.range, (3, 4, 4))
 
-    def test_pagination_that_does_not_advance_is_an_error(self):
+    def test_pagination_that_does_not_advance_is_an_error(self) -> None:
         site = mock.Mock()
         site.back.return_value = page(1, 2, 4)
         site.next_page.return_value = page(1, 2, 4)
         with self.assertRaisesRegex(RuntimeError, "did not advance"):
             restore_list(site, page(3, 4, 4, has_next=False), 4)
 
-    def test_changed_results_are_an_error(self):
+    def test_changed_results_are_an_error(self) -> None:
         site = mock.Mock()
         site.back.return_value = page(1, 2, 4, name="other")
         with self.assertRaisesRegex(RuntimeError, "Results changed"):
