@@ -10,18 +10,18 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from edurec_mappings.documents import (
+    Fetched,
+    attach_documents,
     clean,
     direct_url,
-    document_name,
+    error_summary,
     fetch_document,
-    fetch_documents,
     find_urls,
     process_renderer,
     run_with_deadline,
 )
-from edurec_mappings.models import Fetched, LinkedDocument
-from edurec_mappings.parse import detail
-from tests.test_parse import fixture
+from edurec_mappings.models import LinkedDocument
+from tests.test_parse import detail
 
 
 def pdf_bytes(text: str) -> bytes:
@@ -72,12 +72,12 @@ def folder_entry(href: str, title: str) -> str:
 
 class DocumentTests(unittest.TestCase):
     def test_urls_found_in_detail_fields_without_duplicates(self) -> None:
-        request = detail(fixture("individual.html"))
+        request = detail()
         partner = request.partner_course
-        partner.syllabus = (partner.syllabus or "") + (
+        partner.synopsis = (partner.synopsis or "") + (
             " See https://example.org/outline.html), and http://example.org/a."
         )
-        request.comments = "https://example.org/outline.html again"
+        request.review_comments = "https://example.org/outline.html again"
         self.assertEqual(
             find_urls(request),
             [partner.supporting_url, "https://example.org/outline.html", "http://example.org/a"],
@@ -104,7 +104,7 @@ class DocumentTests(unittest.TestCase):
         )
 
     def test_pdf_html_and_failures_are_recorded(self) -> None:
-        request = detail(fixture("individual.html"))
+        request = detail()
         request.partner_course.other_information = (
             "https://example.org/page https://example.org/missing"
         )
@@ -123,32 +123,31 @@ class DocumentTests(unittest.TestCase):
             return Fetched(404, "text/html", b"gone")
 
         cache: dict[str, LinkedDocument] = {}
-        fetch_documents(request, fetch, cache)
-        docs = request.linked_documents or []
+        attach_documents(request, fetch, cache)
+        docs = request.documents or []
         self.assertEqual([d.status for d in docs], ["fetched", "fetched", "failed"])
         self.assertIn("Syllabus week one", docs[0].text or "")
-        self.assertEqual((docs[0].kind, docs[0].pages), ("pdf", 1))
+        self.assertEqual((docs[0].kind, docs[0].page_count), ("pdf", 1))
         self.assertEqual((docs[1].text, docs[1].kind, docs[1].title), ("T\nOutline", "html", "T"))
-        self.assertEqual(docs[1].bytes, len(b"T\nOutline"))
-        self.assertEqual(docs[1].path, f"documents/{document_name('https://example.org/page')}")
+        self.assertEqual(docs[1].text_bytes, len(b"T\nOutline"))
         self.assertEqual(docs[2].error, "HTTP 404")
-        self.assertIsNone(docs[2].path)
-        fetch_documents(request, fetch, cache)
+        self.assertIsNone(docs[2].text)
+        attach_documents(request, fetch, cache)
         self.assertEqual(len(calls), 3, "Cached URLs must not be fetched again")
-        self.assertIsNot((request.linked_documents or [])[0], cache[docs[0].url])
+        self.assertIsNot((request.documents or [])[0], cache[docs[0].url])
 
     def test_fetch_errors_never_abort_collection(self) -> None:
-        request = detail(fixture("individual.html"))
+        request = detail()
 
         def fetch(url: str) -> NoReturn:
             raise ConnectionError("network down")
 
-        fetch_documents(request, fetch)
-        (document,) = request.linked_documents or []
+        attach_documents(request, fetch)
+        (document,) = request.documents or []
         self.assertEqual((document.status, document.error), ("failed", "network down"))
 
     def test_script_shells_are_rendered_when_a_renderer_is_given(self) -> None:
-        request = detail(fixture("individual.html"))
+        request = detail()
         request.partner_course.other_information = (
             "https://example.org/shell https://example.org/broken-shell https://example.org/full"
         )
@@ -170,8 +169,8 @@ class DocumentTests(unittest.TestCase):
                 b"<p>Course Schedule per Week</p><p>Variational Autoencoder</p></body></html>"
             )
 
-        fetch_documents(request, fetch, {}, render)
-        docs = {d.url.rsplit("/", 1)[-1]: d for d in request.linked_documents or []}
+        attach_documents(request, fetch, {}, render)
+        docs = {d.url.rsplit("/", 1)[-1]: d for d in request.documents or []}
         # Only short HTML pages are rendered; the PDF and the full page are not.
         self.assertEqual(
             rendered, ["https://example.org/shell", "https://example.org/broken-shell"]
@@ -183,6 +182,10 @@ class DocumentTests(unittest.TestCase):
         broken = docs["broken-shell"]
         self.assertEqual((broken.status, broken.text), ("fetched", "Loading"))
         self.assertIn("Week one outline", docs["full"].text or "")
+
+    def test_error_summary_is_the_first_line_or_the_type(self) -> None:
+        self.assertEqual(error_summary(ValueError("HTTP 404\ndetail")), "HTTP 404")
+        self.assertEqual(error_summary(TimeoutError()), "TimeoutError")
 
     def test_pdf_text_is_cleaned(self) -> None:
         self.assertEqual(clean("\ud835\udc65 and \ud835"), "\U0001d465 and \ufffd")
@@ -288,14 +291,14 @@ class DocumentTests(unittest.TestCase):
             run_with_deadline(["sh", "-c", "sleep 30 & sleep 30"], 1)
         self.assertLess(time.monotonic() - started, 10)
 
-    def test_process_renderer_runs_fetch_html_with_the_export_settings(self) -> None:
+    def test_process_renderer_runs_render_html_with_the_export_settings(self) -> None:
         with patch("edurec_mappings.documents.run_with_deadline", return_value=b"<p>x</p>") as run:
             html = process_renderer("socks5://proxy:1080", 60000, 5000)("https://example.org/#/c")
         self.assertEqual(html, b"<p>x</p>")
         command, deadline = run.call_args.args
         self.assertEqual(
             " ".join(command[1:]),
-            "-m edurec_mappings fetch --html --timeout 60 --settle 5.0"
+            "-m edurec_mappings render --html --timeout 60 --settle 5.0"
             " --proxy socks5://proxy:1080 https://example.org/#/c",
         )
         self.assertEqual(deadline, 95)

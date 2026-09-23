@@ -1,5 +1,5 @@
 // Scripts run in the EduRec frame. Playwright evaluates this file as one function:
-// `browser.run` passes {command, ...arguments} and gets back the command's result.
+// `edurec.run_script` passes {command, ...arguments} and gets back the command's result.
 ({command, ...args}) => {
     // Fill a PeopleSoft field and fire the events its delegated handlers listen for.
     const setBox = (box, value) => {
@@ -35,7 +35,8 @@
     return commands[command](args);
 
     function install({
-        panel, buttons, cancel, verdicts, prefills, colours, dry_run: dryRun, comments, fresh,
+        panel, buttons, cancel, comment_box: commentBox, verdicts, labels, prefills, colours,
+        dry_run: dryRun, fresh,
     }) {
         const prior = review();
         prior?.unhook();
@@ -51,7 +52,7 @@
             skipped: false, clicked: null, state,
             unhook: () => hooks.forEach(([t, type, h]) => t.removeEventListener(type, h, true)),
         };
-        const box = document.getElementById(comments);
+        const box = document.getElementById(commentBox);
         document.getElementById('edurec-review-panel')?.remove();
         // A shadow root keeps the page's CSS off the panel.
         const host = document.createElement('div');
@@ -137,8 +138,8 @@
                     } else {
                         const label =
                             state.selected === 'fallback' ? 'Fallback selected' : 'Recommended';
-                        const question =
-                            `${label}: ${verdicts[state.selected]}. Submit ${button.value} anyway?`;
+                        const chosen = labels[verdicts[state.selected]];
+                        const question = `${label}: ${chosen}. Submit ${button.value} anyway?`;
                         if (!window.confirm(question)) return block(event);
                     }
                 }

@@ -10,12 +10,12 @@ which a human submits the course-mapping advisor's proposals in EduRec.
 edurec-mappings/
 ├── src/edurec_mappings/
 │   ├── cli.py              # subcommands, login prompt, browser lifecycle
-│   ├── export.py           # cap-aware search loop
-│   ├── browser.py          # EduRec navigation
+│   ├── export.py           # cap-aware search loop and its subdivision
+│   ├── edurec.py           # EduRec navigation and the review page
 │   ├── parse.py            # list and detail HTML into records
 │   ├── documents.py        # fetching and text extraction of linked URLs
 │   ├── anonymize.py        # keyed request ids and student pseudonyms
-│   ├── store.py            # versions, pending queue, identities
+│   ├── store.py            # versions, proposals, outcomes, student IDs
 │   ├── review.py           # guided review
 │   ├── models.py           # dataclasses and strict YAML I/O
 │   ├── page.js             # scripts run in the EduRec frame
@@ -25,7 +25,7 @@ edurec-mappings/
 ```
 
 Runtime data lives in `../edurec-data/` (outside Git): the store in
-`module-mappings/` and the EduRec login in `browser-profile/`.
+`course-mappings/` and the EduRec login in `browser-profile/`.
 
 ## Setup
 
@@ -46,45 +46,45 @@ EduRec must be accessed from the NUS network.
 Run from this directory; default paths are relative to it.
 
 ```sh
-edurec-mappings export --scrape-urls --store ../edurec-data/module-mappings
-edurec-mappings pending --store ../edurec-data/module-mappings
-edurec-mappings review --store ../edurec-data/module-mappings --dry-run
-edurec-mappings fetch URL
+edurec-mappings export --documents --store ../edurec-data/course-mappings
+edurec-mappings pending --store ../edurec-data/course-mappings
+edurec-mappings review --store ../edurec-data/course-mappings --dry-run
+edurec-mappings render URL
 ```
 
 `--cdp-url` attaches `export` or `review` to a running, logged-in Chromium and
-leaves it open on exit; `--ready` skips the login prompt. See `--help` for the
+leaves it open on exit; `--skip-login` skips the login prompt. See `--help` for the
 rest.
 
 ### export
 
 Waits for the approval form after login (Enter retries), searches, switches the
 grid to **View 100**, opens every matching request and adds the anonymized
-requests to the store. It prints the status (`complete`, `row_limit_reached`
+requests to the store. It prints the status (`complete`, `limit_reached`
 or `interrupted`) and the number of new versions. An interrupted export exits
-with an error but stores what it collected; with `--scrape-urls` documents are
+with an error but stores what it collected; with `--documents` documents are
 fetched after collection, so an interruption during collection stores nothing.
 
 | Option | Given | Blank or omitted |
 | --- | --- | --- |
-| `--reassign-id` | Exact, case-insensitive ReassignID | All, including unassigned |
+| `--reassigned-to` | Exact, case-insensitive ReassignID | All, including unassigned |
 | `--term` | One four-digit term code, e.g. `2610` | Every term in `terms.yaml` (or `--terms-file`) |
-| `--rows` | Stop after this many unique requests | All |
-| `--scrape-urls` | Fetch every URL in the course details | `linked_documents` is `null` |
+| `--limit` | Stop after this many unique requests | All |
+| `--documents` | Fetch every URL in the course details | `documents` is `null` |
 
 **Search subdivision.** EduRec shows at most 300 rows per search and paging
 cannot go further. Each term is searched separately; a capped search is split
 by student ID, then mapping group and sequence. A search still capped after
 every split ends the export as `interrupted`.
 
-**URL scraping.** URLs in the partner course title, supporting URL, synopsis,
+**Documents.** URLs in the partner course title, supporting URL, synopsis,
 other information, prerequisites and comments are fetched through the browser
 session. Dropbox, Google Drive file and Google Docs share links are rewritten to
 their download or export URLs. PDF, Word (`.docx`), HTML and plain text are
 read; a zip archive (such as a Dropbox folder link) and the top level of a
 shared Google Drive folder (up to 20 files, no subfolders) are read file by
 file into one text with a `=== name ===` heading per file. An HTML page with
-under 1,000 characters of text, or a `#/` route, is re-read with `fetch --html`
+under 1,000 characters of text, or a `#/` route, is re-read with `render --html`
 to catch script-rendered catalogues; that browser runs in its own process, is not
 signed in, and is killed 30 s after its page timeout and settle time. A short page titled as a sign-in or bot check
 is recorded as `failed`. HTTP 429 and 502–504 are retried once after 10 s. Text
@@ -100,7 +100,8 @@ many-to-one mapping together. It is the course-mapping advisor's work queue.
 ### review
 
 Walks the latest versions that have a proposal and no outcome, listing siblings
-together; `--request-id` and `--verdict` (repeatable) narrow the queue.
+together; `--request-id` and `--verdict` (repeatable, e.g. `request_remapping`)
+narrow the queue.
 `--dry-run` shows the same panels with the action buttons disabled and writes
 nothing.
 
@@ -119,11 +120,12 @@ session. Leaving the detail page skips the request. Only clicks made while the
 panel is shown are recorded; on error the browser is closed, so do not act in
 EduRec after the program stops.
 
-A submitted verdict is written to `outcomes/<request_id>/<hash>.yaml` when the
-click is seen and finalised after verification; a request that already left the
-queue gets action `not in approval queue`. Skips are offered again next session.
+A submitted verdict is written to `outcomes/<request_id>/<hash>.yaml` with
+`verified: false` when the click is seen, and rewritten with `verified: true`
+once the request has left the queue; a request that had already left gets
+`verdict: null`. Skips are offered again next session.
 
-### fetch
+### render
 
 Prints the title and text of one page after its scripts have run, in a fresh
 headless browser without login. For retrying links an export recorded as
@@ -134,18 +136,18 @@ headless browser without login. For retrying links an export recorded as
 Exports only add or rewrite files; nothing is deleted.
 
 ```
-module-mappings/
+course-mappings/
 ├── requests/<request_id>/<hash>.yaml    # anonymized request versions (export)
 ├── proposals/<request_id>/<hash>.yaml   # the advisor's proposals (not written by this package)
 ├── outcomes/<request_id>/<hash>.yaml    # submitted verdicts (review)
 ├── documents/<url_hash>.txt             # latest scraped text per URL
 └── private/                             # never give the advisor access
-    ├── identities.yaml                  # request_id -> real student ID; read only by review
-    └── secret                           # HMAC key; back it up
+    ├── student_ids.yaml                 # request_id -> real student ID; read only by review
+    └── hmac_key                         # back it up
 ```
 
 - **Request file**: the fields are defined by `models.Request`.
-  `related_request_ids` lists only siblings found in the same export.
+  `sibling_request_ids` lists only siblings found in the same export.
 - **`<hash>`** covers the request content, including linked document text,
   comments and siblings, but not EduRec status or fetch metadata. An export
   writes a file only when the hash differs from the latest version (the one
@@ -154,8 +156,8 @@ module-mappings/
 - **Proposals and outcomes** are keyed by path, so they bind to one request
   version: changed content becomes a new version, pending again.
 - **Identifiers**: `request_id` and the `student-…` pseudonym are HMAC digests
-  keyed by `private/secret`, stable across exports and irreversible without it.
-  A new secret would detach every proposal.
+  keyed by `private/hmac_key`, stable across exports and irreversible without it.
+  A new key would detach every proposal.
 
 ## Guarantees and limits
 

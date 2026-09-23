@@ -1,5 +1,4 @@
 import copy
-import hmac
 import stat
 import tempfile
 import unittest
@@ -8,22 +7,21 @@ from pathlib import Path
 
 import yaml
 
-from edurec_mappings.anonymize import anonymize, pseudonym, request_id
 from edurec_mappings.cli import run_pending
-from edurec_mappings.models import SCHEMA_VERSION, Identity, LinkedDocument, Request, plain
-from edurec_mappings.store import IDENTITIES, PROPOSALS, SECRET, Store, content_hash
+from edurec_mappings.models import SCHEMA_VERSION, LinkedDocument, Outcome, Request, plain
+from edurec_mappings.store import (
+    HMAC_KEY,
+    PROPOSALS,
+    STUDENT_IDS,
+    Store,
+    content_hash,
+    document_path,
+)
 from tests.test_cli import namespace, quietly
 from tests.test_export import records
+from tests.test_parse import detail
 
-IDENTITY = Identity(
-    student_id="A0000001X",
-    academic_career="Undergraduate",
-    partner_university="Technical University of Munich",
-    study_program="SEP",
-    term="2025/2026 Semester 1",
-    mapping_number="1",
-    sequence="2",
-)
+URL = "https://example.org/s.pdf"
 
 
 def sample(count: int = 3) -> list[Request]:
@@ -32,45 +30,26 @@ def sample(count: int = 3) -> list[Request]:
 
 def with_document(request: Request, text: str | None) -> Request:
     request = copy.deepcopy(request)
-    request.linked_documents = [
+    request.documents = [
         LinkedDocument(
-            "https://example.org/s.pdf",
-            status="fetched" if text else "failed",
-            text=text,
-            bytes=len(text or ""),
-            path="documents/abc.txt" if text else None,
+            URL, status="fetched" if text else "failed", text=text, text_bytes=len(text or "")
         )
     ]
     return request
 
 
-class KeyTests(unittest.TestCase):
-    def test_identifiers_are_keyed_hmacs(self) -> None:
-        self.assertEqual(request_id(b"k", IDENTITY), request_id(b"k", copy.deepcopy(IDENTITY)))
-        self.assertNotEqual(request_id(b"k", IDENTITY), request_id(b"other", IDENTITY))
-        self.assertEqual(len(request_id(b"k", IDENTITY)), 24)
-        expected = hmac.new(b"k", b"A0000001X", "sha256").hexdigest()[:12]
-        self.assertEqual(pseudonym(b"k", "A0000001X"), f"student-{expected}")
-
-    def test_anonymize_leaves_the_original_untouched(self) -> None:
-        (request,) = sample(1)
-        before = plain(request)
-        anonymous = anonymize(request, b"k")
-        self.assertEqual(plain(request), before)
-        self.assertEqual(anonymous.request_id, request_id(b"k", request.identity))
-        self.assertTrue(anonymous.identity.student_id.startswith("student-"))
-
+class ContentHashTests(unittest.TestCase):
     def test_content_hash_covers_content_and_document_text_only(self) -> None:
         (request,) = sample(1)
         base = content_hash(request)
         same: list[Callable[[Request], None]] = [
-            lambda r: setattr(r, "status", "Approved"),
+            lambda r: setattr(r, "approval_status", "Approved"),
             lambda r: setattr(r, "created_at", "2026-01-01T00:00:00+00:00"),
             lambda r: setattr(r, "schema_version", 99),
         ]
         different: list[Callable[[Request], None]] = [
-            lambda r: setattr(r, "comments", "new comment"),
-            lambda r: setattr(r, "related_request_ids", ["x"]),
+            lambda r: setattr(r, "review_comments", "new comment"),
+            lambda r: setattr(r, "sibling_request_ids", ["x"]),
         ]
         for change in same:
             changed = copy.deepcopy(request)
@@ -84,8 +63,8 @@ class KeyTests(unittest.TestCase):
         self.assertNotEqual(content_hash(fetched), base)
         self.assertNotEqual(content_hash(with_document(request, "Week 2")), content_hash(fetched))
         metadata = copy.deepcopy(fetched)
-        assert metadata.linked_documents is not None
-        metadata.linked_documents[0].bytes, metadata.linked_documents[0].title = 1, "T"
+        assert metadata.documents is not None
+        metadata.documents[0].text_bytes, metadata.documents[0].title = 1, "T"
         self.assertEqual(content_hash(metadata), content_hash(fetched))
         self.assertEqual(len(base), 16)
 
@@ -108,35 +87,49 @@ class StoreTests(unittest.TestCase):
             [p.relative_to(self.root).as_posix() for p in self.files()],
             sorted(v.path() for v in added),
         )
-        secret = self.root / SECRET
-        self.assertEqual(stat.S_IMODE(secret.stat().st_mode), 0o600)
-        self.assertEqual((self.root / "documents" / "abc.txt").read_text(), "Week 1: search")
+        key = self.root / HMAC_KEY
+        self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
+        self.assertEqual((self.root / document_path(URL)).read_text(), "Week 1: search")
         stored = yaml.safe_load(self.files()[0].read_text())
         self.assertEqual(stored["schema_version"], SCHEMA_VERSION)
         self.assertEqual(list(stored)[:3], ["schema_version", "created_at", "request_id"])
-        self.assertNotIn("text", stored["linked_documents"][0])
+        self.assertNotIn("text", stored["documents"][0])
+        self.assertEqual(stored["documents"][0]["text_path"], document_path(URL))
         text = "".join(p.read_text() for p in self.files())
         for request in requests:
             self.assertNotIn(request.identity.student_id, text)
-        identities = self.store.identities()
         self.assertEqual(
-            identities,
+            self.store.student_ids(),
             {v.request_id: r.identity.student_id for v, r in zip(added, requests, strict=True)},
+        )
+
+    def test_stored_request_has_no_session_tokens(self) -> None:
+        (version,) = self.store.save([detail()])
+        content = self.store.file(version).read_text()
+        result = yaml.safe_load(content)
+        self.assertEqual(result, plain(version.request))
+        self.assertNotIn("ICSID", content)
+        self.assertNotIn("&id", content, "Records must not be emitted as YAML aliases")
+        self.assertEqual(result["sibling_request_ids"], [])
+        self.assertNotIn("name", result["student"])
+        self.assertEqual(
+            result["partner_course"]["assessments"][0].keys(),
+            {"method", "weight_percent", "remark"},
         )
 
     def test_ids_are_stable_across_exports_and_unchanged_requests_are_not_rewritten(self) -> None:
         first = self.store.save(sample())
-        secret = (self.root / SECRET).read_text()
+        key = (self.root / HMAC_KEY).read_text()
         before = {p: p.stat().st_mtime_ns for p in self.files()}
         self.assertEqual(self.store.save(sample()), [])
         self.assertEqual({p: p.stat().st_mtime_ns for p in self.files()}, before)
-        self.assertEqual((self.root / SECRET).read_text(), secret, "never regenerated")
+        self.assertEqual((self.root / HMAC_KEY).read_text(), key, "never regenerated")
         self.assertEqual([v.request_id for v in self.store.latest()], [v.request_id for v in first])
 
     def test_a_changed_request_adds_a_version_that_becomes_latest(self) -> None:
         (old,) = self.store.save(sample(1))
         changed = sample(1)
-        changed[0].comments = "Please add the syllabus"
+        changed[0].review_comments = "Please add the syllabus"
         (new,) = self.store.save(changed)
         self.assertEqual(new.request_id, old.request_id)
         self.assertNotEqual(new.hash, old.hash)
@@ -148,27 +141,35 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(again.hash, old.hash)
         self.assertEqual(self.store.latest()[0].hash, old.hash)
 
-    def test_identities_are_merged(self) -> None:
+    def test_student_ids_are_merged(self) -> None:
         requests = sample(3)
         self.store.save(requests[:1])
         self.store.save(requests[1:])
-        self.assertEqual(len(self.store.identities()), 3)
+        self.assertEqual(len(self.store.student_ids()), 3)
         self.assertEqual(
-            yaml.safe_load((self.root / IDENTITIES).read_text()), self.store.identities()
+            yaml.safe_load((self.root / STUDENT_IDS).read_text()), self.store.student_ids()
         )
+
+    def test_outcomes_round_trip_per_version(self) -> None:
+        (version,) = self.store.save(sample(1))
+        self.assertIsNone(self.store.outcome(version))
+        outcome = Outcome(verdict="approve", comment="c", verified=True, recorded_at="t")
+        self.store.save_outcome(version, outcome)
+        self.assertEqual(self.store.outcome(version), outcome)
+        self.assertIsNone(self.store.proposal(version))
 
     def test_pending_is_the_unproposed_latest_versions_with_siblings_together(self) -> None:
         requests = sample(3)
         requests[2].identity = copy.deepcopy(requests[0].identity)
         requests[2].identity.sequence = "2"
         added = self.store.save(requests)
-        self.assertEqual(added[0].request.related_request_ids, [added[2].request_id])
+        self.assertEqual(added[0].request.sibling_request_ids, [added[2].request_id])
         pending = self.store.pending()
         self.assertEqual(
             [v.request_id for v in pending],
             [added[0].request_id, added[2].request_id, added[1].request_id],
         )
-        proposed = self.root / added[1].path(PROPOSALS)
+        proposed = self.store.file(added[1], PROPOSALS)
         proposed.parent.mkdir(parents=True)
         proposed.write_text("verdict: approve\n")
         self.assertNotIn(added[1].request_id, [v.request_id for v in self.store.pending()])
@@ -176,6 +177,6 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(out.split(), [added[0].path(), added[2].path()])
         # A new version of a proposed request is pending again.
         changed = sample(2)[1]
-        changed.comments = "edited"
+        changed.review_comments = "edited"
         self.store.save([changed])
         self.assertIn(added[1].request_id, [v.request_id for v in self.store.pending()])

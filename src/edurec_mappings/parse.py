@@ -13,6 +13,7 @@ from .models import (
     LIST_COLUMNS,
     Assessment,
     ContactHours,
+    GridCounter,
     Identity,
     Listing,
     ListRow,
@@ -23,6 +24,7 @@ from .models import (
 )
 
 GRID = "tdgbrPTS_CFG_CL_STD_RSL$0"
+COUNTER = "win0divPTS_CFG_CL_STD_RSLGP$0"
 NEXT = "PTS_CFG_CL_STD_RSL$hdown$0"
 VIEW_ALL = "PTS_CFG_CL_STD_RSL$hviewall$0"
 DETAIL = "N_EXSP_MOD_DT_TRNSFR_EQVLNCY_GRP$0"
@@ -42,7 +44,7 @@ def can_expand(soup: BeautifulSoup) -> bool:
     return link is not None and bool(re.fullmatch(r"View\s+(100|All)", text(link) or "", re.I))
 
 
-def listing(soup: BeautifulSoup) -> Listing:
+def parse_listing(soup: BeautifulSoup) -> Listing:
     grid = soup.find(id=GRID)
     if not isinstance(grid, Tag):
         raise ValueError("Request list not found")
@@ -55,14 +57,16 @@ def listing(soup: BeautifulSoup) -> Listing:
         if len(cells) < len(LIST_COLUMNS):
             raise ValueError("Unexpected list columns; extraction stopped")
         values = dict(zip(LIST_COLUMNS, (text(c) for c in cells), strict=False))
-        rows.append(ListRow(**values, action=action[0]))
-    counter = soup.find(id="win0divPTS_CFG_CL_STD_RSLGP$0")
+        rows.append(ListRow(**values, row_action=action[0]))
+    counter = soup.find(id=COUNTER)
     counter = counter.select_one(".PSGRIDCOUNTER") if isinstance(counter, Tag) else None
     # A single row is counted "1 of 1"; longer pages "1-100 of 300".
     match = re.search(r"(\d+)(?:\s*-\s*(\d+))?\s+of\s+(\d+)", text(counter) or "")
     return Listing(
         rows=rows,
-        range=(int(match[1]), int(match[2] or match[1]), int(match[3])) if match else None,
+        counter=GridCounter(int(match[1]), int(match[2] or match[1]), int(match[3]))
+        if match
+        else None,
         has_next=soup.find("a", id=NEXT) is not None,
     )
 
@@ -73,15 +77,26 @@ def required(name: str, value: str | None) -> str:
     return value
 
 
-def detail(soup: BeautifulSoup) -> Request:
+def detail_field(soup: BeautifulSoup, suffix: str) -> str | None:
+    return text(soup.find(id=f"N_EXSP_MOD_DT_{suffix}$0"))
+
+
+def approval_status(soup: BeautifulSoup) -> str | None:
+    """The status shown on a detail page; `ValueError` on any other page."""
     if soup.find(id=DETAIL) is None:
         raise ValueError("Mapping detail not found")
+    return detail_field(soup, "N_MOD_APPR_STATUS")
 
-    def get(field: str) -> str | None:
-        return text(soup.find(id=field))
+
+def parse_detail(soup: BeautifulSoup, term_code: str | None) -> Request:
+    """The detail page as a request; `term_code` comes from the results row it was opened from."""
+    status = approval_status(soup)
+
+    def get(element_id: str) -> str | None:
+        return text(soup.find(id=element_id))
 
     def field(suffix: str) -> str | None:
-        return get("N_EXSP_MOD_DT_" + suffix + "$0")
+        return detail_field(soup, suffix)
 
     def table(prefix: str, record: Callable[..., T], width: int) -> list[T]:
         pattern = re.compile("^tr" + re.escape(prefix) + r"\$0_row\d+$")
@@ -95,9 +110,10 @@ def detail(soup: BeautifulSoup) -> Request:
         student_id=required("student ID", get("N_EXSP_WKST_HDR_EMPLID")),
         academic_career=required("academic career", get("ACAD_CAR_TBL_DESCR")),
         partner_university=required("partner university", get("EXT_ORG_TBL_N_FORMAL_DESCR")),
-        study_program=required("study program", get("N_EXT_PRG_VW_DESCRFORMAL")),
+        exchange_program=required("exchange program", get("N_EXT_PRG_VW_DESCRFORMAL")),
         term=required("term", get("TERM_TBL_DESCR")),
-        mapping_number=required("mapping number", field("TRNSFR_EQVLNCY_GRP")),
+        term_code=required("term code", term_code),
+        group=required("group", field("TRNSFR_EQVLNCY_GRP")),
         sequence=required("sequence", field("TRNSFR_EQVLNCY_SEQ")),
     )
     return Request(
@@ -114,7 +130,7 @@ def detail(soup: BeautifulSoup) -> Request:
             number=field("SCHOOL_CRSE_NBR"),
             title=field("DESCR100"),
             credits=field("UNT_TAKEN"),
-            syllabus=field("N_MOD_SYNOPSIS"),
+            synopsis=field("N_MOD_SYNOPSIS"),
             instruction_weeks=field("WEEKS_OF_INSTRUCT"),
             contact_hours=table("N_EXSP_MOD", ContactHours, 3),
             assessments=table("N_EXSP_ASGNMT", Assessment, 3),
@@ -128,6 +144,6 @@ def detail(soup: BeautifulSoup) -> Request:
             units=field("UNT_TRNSFR"),
         ),
         prerequisites=field("N_PREREQUISITE_DTL"),
-        status=field("N_MOD_APPR_STATUS"),
-        comments=field("N_MOD_COMMENTS"),
+        approval_status=status,
+        review_comments=field("N_MOD_COMMENTS"),
     )

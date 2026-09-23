@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import math
 import os
@@ -15,6 +14,7 @@ import zipfile
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
+from typing import NamedTuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
@@ -23,8 +23,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from .models import Fetched, LinkedDocument, Request
-from .store import DOCUMENTS
+from .models import LinkedDocument, Request
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'　]+", re.I)
 TRAILING = ".,;:!?)]}>'\""
@@ -46,10 +45,28 @@ BLOCK_PAGE_TEXT = 3000
 BLOCK_TITLE = re.compile(
     r"sign[- ]?in|log[- ]?in|anmeld|request rejected|content blocked|access denied", re.I
 )
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+DRIVE_FILE = re.compile(r"^/file/d/([\w-]+)")
+DRIVE_FOLDER = re.compile(r"^/drive/(?:u/\d+/)?folders/([\w-]+)")
+# `/d/e/<id>/pub` is a published copy, readable as HTML but without an export endpoint.
+GOOGLE_DOC = re.compile(r"^/(document|presentation|spreadsheets)/d/(?!e/)([\w-]+)")
+WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+DOC_EXPORT = {"document": "txt", "presentation": "pdf", "spreadsheets": "csv"}
+
+
+class Fetched(NamedTuple):
+    """An HTTP response for the document fetcher."""
+
+    status: int
+    content_type: str | None
+    body: bytes
+
 
 Fetcher = Callable[[str], Fetched]
 Renderer = Callable[[str], bytes]
 """Loads a URL in a browser page, runs its scripts and returns the rendered HTML."""
+BundleFile = tuple[str, str | None, bytes | Exception]
+"""A file's name, content type and bytes, or why it could not be downloaded."""
 
 
 def find_urls(request: Request) -> list[str]:
@@ -57,11 +74,11 @@ def find_urls(request: Request) -> list[str]:
     partner = request.partner_course
     sources = [
         partner.supporting_url,
-        partner.syllabus,
+        partner.synopsis,
         partner.other_information,
         partner.title,
         request.prerequisites,
-        request.comments,
+        request.review_comments,
     ]
     found: list[str] = []
     for value in sources:
@@ -73,14 +90,6 @@ def find_urls(request: Request) -> list[str]:
             if url and url not in found:
                 found.append(url)
     return found
-
-
-DRIVE_FILE = re.compile(r"^/file/d/([\w-]+)")
-DRIVE_FOLDER = re.compile(r"^/drive/(?:u/\d+/)?folders/([\w-]+)")
-# `/d/e/<id>/pub` is a published copy, readable as HTML but without an export endpoint.
-GOOGLE_DOC = re.compile(r"^/(document|presentation|spreadsheets)/d/(?!e/)([\w-]+)")
-WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-DOC_EXPORT = {"document": "txt", "presentation": "pdf", "spreadsheets": "csv"}
 
 
 def direct_url(url: str) -> str:
@@ -119,10 +128,6 @@ def docx_text(data: bytes) -> str:
     return "\n".join(p.strip() for p in paragraphs if p.strip())
 
 
-BundleFile = tuple[str, str | None, bytes | Exception]
-"""A file's name, content type and bytes, or why it could not be downloaded."""
-
-
 def bundle_text(files: list[BundleFile]) -> str:
     """The text of each file under a `=== name ===` heading; unreadable files say why.
 
@@ -136,7 +141,7 @@ def bundle_text(files: list[BundleFile]) -> str:
                 raise data
             text = extract_text(name, content_type, data, bundles=False).text or ""
         except Exception as error:
-            text = f"[Not read: {reason(error)}]"
+            text = f"[Not read: {error_summary(error)}]"
         else:
             readable = readable or bool(text.strip())
             text = text or "[No extractable text]"
@@ -181,7 +186,7 @@ def extract_text(
     head = data[:256].lstrip().lower()
     if kind == "application/pdf" or data.startswith(b"%PDF-"):
         text, pages = pdf_text(data)
-        return LinkedDocument(url, kind="pdf", text=text, pages=pages)
+        return LinkedDocument(url, kind="pdf", text=text, page_count=pages)
     if data.startswith(b"PK"):
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             is_docx = "word/document.xml" in archive.namelist()
@@ -197,11 +202,6 @@ def extract_text(
     if kind.startswith("text/"):
         return LinkedDocument(url, kind="text", text=data.decode(charset or "utf-8", "replace"))
     raise ValueError(f"Unsupported content type: {kind or 'unknown'}")
-
-
-def document_name(url: str) -> str:
-    """File name for a URL's text under `documents/`; the same URL always maps to one file."""
-    return f"{hashlib.sha256(url.encode()).hexdigest()[:16]}.txt"
 
 
 def rendered_text(target: str, render: Renderer, extracted: LinkedDocument) -> LinkedDocument:
@@ -225,11 +225,9 @@ def rendered_text(target: str, render: Renderer, extracted: LinkedDocument) -> L
     return replace(extracted, text=text, title=title or extracted.title)
 
 
-def reason(error: Exception) -> str:
+def error_summary(error: BaseException) -> str:
+    """The first line of the error's message, or its type when the message is empty."""
     return str(error).splitlines()[0] if str(error) else type(error).__name__
-
-
-CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 def clean(text: str) -> str:
@@ -304,38 +302,38 @@ def fetch_document(url: str, fetch: Fetcher, render: Renderer | None = None) -> 
             and BLOCK_TITLE.search(record.title or "")
         ):
             raise ValueError(f"Sign-in or block page: {record.title}")
-        record = replace(record, text=text, bytes=len(text.encode()))
+        record = replace(record, text=text, text_bytes=len(text.encode()))
     except Exception as error:
-        return LinkedDocument(url, error=reason(error))
+        return LinkedDocument(url, error=error_summary(error))
     if not record.text:
         return replace(record, status="empty", error="No extractable text", text=None)
-    if (record.bytes or 0) > MAX_TEXT_BYTES:
+    if (record.text_bytes or 0) > MAX_TEXT_BYTES:
         too_large = f"Extracted text exceeds {MAX_TEXT_BYTES} bytes"
         return replace(record, status="too_large", error=too_large, text=None)
-    return replace(record, status="fetched", path=f"{DOCUMENTS}/{document_name(url)}")
+    return replace(record, status="fetched")
 
 
-def fetch_documents(
+def attach_documents(
     request: Request,
     fetch: Fetcher,
     cache: dict[str, LinkedDocument] | None = None,
     render: Renderer | None = None,
 ) -> None:
-    """Attach `linked_documents` to the request in place."""
+    """Set the request's `documents` in place."""
     cache = cache if cache is not None else {}
     documents: list[LinkedDocument] = []
     for url in find_urls(request):
         if url not in cache:
             cache[url] = fetch_document(url, fetch, render)
         documents.append(replace(cache[url]))
-    request.linked_documents = documents
+    request.documents = documents
 
 
 def scrape(requests: list[Request], fetch: Fetcher, render: Renderer | None = None) -> None:
     """Fetch every URL in the requests once and attach the documents to them."""
     cache: dict[str, LinkedDocument] = {}
     for index, request in enumerate(requests, 1):
-        fetch_documents(request, fetch, cache, render)
+        attach_documents(request, fetch, cache, render)
         print(f"Scraped URLs for {index}/{len(requests)} requests", flush=True)
 
 
@@ -390,7 +388,7 @@ def run_with_deadline(command: list[str], deadline_s: float) -> bytes:
 def process_renderer(
     proxy: str | None, timeout: float, settle_ms: float = RENDER_SETTLE_MS
 ) -> Renderer:
-    """Render each URL with `fetch --html` in its own headless browser, killed at a deadline.
+    """Render each URL with `render --html` in its own headless browser, killed at a deadline.
 
     A page that keeps its scripts busy can block Playwright calls that take no timeout,
     such as reading the DOM, and would stall the whole export in the export's own browser.
@@ -402,7 +400,7 @@ def process_renderer(
         options += ["--proxy", proxy]
 
     def render(url: str) -> bytes:
-        command = [sys.executable, "-m", "edurec_mappings", "fetch", "--html", *options, url]
+        command = [sys.executable, "-m", "edurec_mappings", "render", "--html", *options, url]
         return run_with_deadline(command, deadline_s)
 
     return render

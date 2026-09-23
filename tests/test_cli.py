@@ -11,28 +11,25 @@ from unittest import mock
 from playwright.sync_api import Error as PlaywrightError
 
 from edurec_mappings import cli
-from edurec_mappings.browser import COMPONENT, ApprovalNotLoadedError
-from edurec_mappings.models import Export, LinkedDocument, Request
+from edurec_mappings.edurec import COMPONENT
+from edurec_mappings.models import ExportResult, LinkedDocument, Request
 from tests.test_export import records
 
-NOT_LOADED = ApprovalNotLoadedError(
-    "Course Mapping Approval is not loaded. Open the approval component."
-)
 DUPLICATES = RuntimeError("Found 2 Course Mapping Approval frames.")
 
 
 def namespace(**overrides: object) -> argparse.Namespace:
     values: dict[str, object] = {
-        "ready": False,
+        "skip_login": False,
         "cdp_url": None,
         "timeout": 60,
         "timeout_ms": 60000,
         "command": "export",
-        "reassign_id": " ",
+        "reassigned_to": " ",
         "term": "",
-        "rows": None,
+        "limit": None,
         "terms": ["2620"],
-        "scrape_urls": False,
+        "documents": False,
         "proxy": "",
         "store": "store",
         "request_ids": [],
@@ -51,8 +48,7 @@ def quietly(function: Callable[..., object], *args: object) -> str:
 
 class AwaitApprovalTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.frame = self.patch("mapping_frame")
-        self.open_component = self.patch("open_component")
+        self.ensure_approval = self.patch("ensure_approval")
         self.approval_ready = self.patch("approval_ready", return_value=False)
         self.context = mock.MagicMock()
         self.wait_for_enter = self.patch("wait_for_enter", return_value=True)
@@ -63,21 +59,13 @@ class AwaitApprovalTests(unittest.TestCase):
         started: mock.MagicMock = patcher.start()
         return started
 
-    def test_ready_with_form_present_does_not_navigate(self) -> None:
-        cli.await_approval(self.context, namespace(ready=True))
-        self.open_component.assert_not_called()
-
-    def test_ready_opens_the_component_when_only_the_dashboard_is_up(self) -> None:
-        self.frame.side_effect = [NOT_LOADED, None]
-        cli.await_approval(self.context, namespace(ready=True))
-        self.open_component.assert_called_once_with(self.context, 60000)
-        self.assertEqual(self.frame.call_count, 2)
-
-    def test_ready_propagates_other_frame_errors(self) -> None:
-        self.frame.side_effect = DUPLICATES
+    def test_skip_login_requires_the_form_at_once(self) -> None:
+        cli.await_approval(self.context, namespace(skip_login=True))
+        self.ensure_approval.assert_called_once_with(self.context, 60000)
+        self.approval_ready.assert_not_called()
+        self.ensure_approval.side_effect = DUPLICATES
         with self.assertRaises(RuntimeError):
-            cli.await_approval(self.context, namespace(ready=True))
-        self.open_component.assert_not_called()
+            cli.await_approval(self.context, namespace(skip_login=True))
 
     def test_detected_login_proceeds_without_enter(self) -> None:
         self.approval_ready.return_value = True
@@ -85,25 +73,27 @@ class AwaitApprovalTests(unittest.TestCase):
         self.assertIn("Course Mapping Approval detected", out)
         self.wait_for_enter.assert_not_called()
 
-    def test_polls_until_enter_then_opens_the_component(self) -> None:
+    def test_polls_until_enter_then_requires_the_form(self) -> None:
         self.wait_for_enter.side_effect = [False, True]
-        self.frame.side_effect = [NOT_LOADED, None]
         quietly(cli.await_approval, self.context, namespace())
-        self.open_component.assert_called_once_with(self.context, 60000)
+        self.ensure_approval.assert_called_once_with(self.context, 60000)
 
     def test_failed_retry_keeps_waiting(self) -> None:
         self.approval_ready.side_effect = [False, True]
-        self.frame.side_effect = DUPLICATES
+        self.ensure_approval.side_effect = DUPLICATES
         out = quietly(cli.await_approval, self.context, namespace())
         self.assertIn("Not ready: Found 2 Course Mapping Approval frames.", out)
         self.assertIn("Course Mapping Approval detected", out)
 
     def test_navigation_error_on_retry_keeps_waiting(self) -> None:
-        self.approval_ready.side_effect = [False, True]
-        self.frame.side_effect = NOT_LOADED
-        self.open_component.side_effect = PlaywrightError("Timeout 60000ms exceeded.\ndetail")
-        out = quietly(cli.await_approval, self.context, namespace())
-        self.assertIn("Not ready: Timeout 60000ms exceeded.\n", out)
+        for error, shown in [
+            (PlaywrightError("Timeout 60000ms exceeded.\ndetail"), "Timeout 60000ms exceeded.\n"),
+            (RuntimeError(""), "RuntimeError\n"),
+        ]:
+            self.approval_ready.side_effect = [False, True]
+            self.ensure_approval.side_effect = error
+            out = quietly(cli.await_approval, self.context, namespace())
+            self.assertIn(f"Not ready: {shown}", out)
 
 
 class ConnectTests(unittest.TestCase):
@@ -130,7 +120,7 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("Initial navigation failed: net::ERR_PROXY\n", out)
         self.await_approval.assert_called_once()
         with self.assertRaises(PlaywrightError):
-            cli.connect(self.context, namespace(ready=True))
+            cli.connect(self.context, namespace(skip_login=True))
 
 
 def collected(count: int = 2) -> list[Request]:
@@ -148,7 +138,7 @@ class RunTests(unittest.TestCase):
             "process_renderer",
             "scrape",
             "Store",
-            "Reviewer",
+            "ReviewPage",
             "review",
             "hold_open",
         ):
@@ -156,7 +146,7 @@ class RunTests(unittest.TestCase):
             self.mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
 
-        def export(site: object, data: Export, **_: object) -> None:
+        def export(site: object, data: ExportResult, **_: object) -> None:
             data.requests.extend(collected())
             data.status = "complete"
 
@@ -175,8 +165,8 @@ class RunTests(unittest.TestCase):
         self.mocks["export"].assert_called_once_with(
             self.mocks["EduRec"].return_value,
             mock.ANY,
-            reassign_id="",
-            rows=None,
+            reassigned_to="",
+            limit=None,
             terms=["2620"],
         )
         self.assertIn("complete: 2 requests collected", out)
@@ -189,16 +179,16 @@ class RunTests(unittest.TestCase):
     def test_run_scrapes_before_storing_when_asked(self) -> None:
         def scrape(requests: list[Request], *_: object) -> None:
             for request in requests:
-                request.linked_documents = [LinkedDocument("https://example.org")]
+                request.documents = [LinkedDocument("https://example.org")]
 
         self.mocks["scrape"].side_effect = scrape
-        quietly(cli.run_export, self.context, namespace(scrape_urls=True))
+        quietly(cli.run_export, self.context, namespace(documents=True))
         (stored,) = self.save.call_args.args
         self.assertEqual(len(stored), 2)
-        self.assertTrue(all(r.linked_documents for r in stored))
+        self.assertTrue(all(r.documents for r in stored))
 
     def test_an_interrupted_export_stores_what_was_complete(self) -> None:
-        def export(site: object, data: Export, **_: object) -> None:
+        def export(site: object, data: ExportResult, **_: object) -> None:
             data.requests.extend(collected(1))
             raise RuntimeError("lost session")
 
@@ -210,17 +200,17 @@ class RunTests(unittest.TestCase):
             mock.ANY, "Collection stopped: lost session."
         )
         self.assert_dialog_hook_removed()
-        # With --scrape-urls a request is only complete once its documents are known.
+        # With --documents a request is only complete once its documents are known.
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
-            cli.run_export(self.context, namespace(scrape_urls=True))
+            cli.run_export(self.context, namespace(documents=True))
         self.assertEqual(self.save.call_args.args[0], [])
 
     def test_run_review_passes_the_filters_and_reports_errors(self) -> None:
         args = namespace(request_ids=["r1"], verdicts=["approve"], dry_run=True)
         quietly(cli.run_review, self.context, args)
-        self.mocks["Reviewer"].assert_called_once_with(self.context, 60000)
+        self.mocks["ReviewPage"].assert_called_once_with(self.context, 60000)
         self.mocks["review"].assert_called_once_with(
-            self.mocks["Reviewer"].return_value,
+            self.mocks["ReviewPage"].return_value,
             "store",
             request_ids=["r1"],
             verdicts=["approve"],
@@ -253,29 +243,31 @@ class ParseArgsTests(unittest.TestCase):
     def test_export_arguments(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.parse_args(["export"])
-        self.assertFalse(cli.parse_args(["export", "--store", "s"]).scrape_urls)
-        args = cli.parse_args(["export", "--scrape-urls", "--store", "s"])
-        self.assertTrue(args.scrape_urls)
-        self.assertEqual(args.store, "s")
+        self.assertFalse(cli.parse_args(["export", "--store", "s"]).documents)
+        args = cli.parse_args(
+            ["export", "--documents", "--store", "s", "--reassigned-to", "X", "--limit", "5"]
+        )
+        self.assertTrue(args.documents)
+        self.assertEqual((args.store, args.reassigned_to, args.limit), ("s", "X", 5))
 
     def test_review_arguments(self) -> None:
         args = cli.parse_args(
-            ["review", "--store", "s", "--request-id", "a", "--verdict", "reject"]
+            ["review", "--store", "s", "--request-id", "a", "--verdict", "request_remapping"]
         )
-        self.assertEqual((args.request_ids, args.verdicts), (["a"], ["reject"]))
+        self.assertEqual((args.request_ids, args.verdicts), (["a"], ["request_remapping"]))
         self.assertFalse(args.dry_run)
         self.assertEqual(args.timeout_ms, 60000)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.parse_args(["review", "--store", "s", "--verdict", "maybe"])
 
     def test_blank_arguments_and_invalid_limits(self) -> None:
-        self.assertIsNone(cli.optional_rows(""))
-        self.assertEqual(cli.optional_rows("12"), 12)
+        self.assertIsNone(cli.optional_limit(""))
+        self.assertEqual(cli.optional_limit("12"), 12)
         self.assertEqual(cli.term_code(""), "")
         self.assertEqual(cli.term_code(" 2610 "), "2610")
         for value in ("0", "-1", "abc"):
             with self.assertRaises(argparse.ArgumentTypeError):
-                cli.optional_rows(value)
+                cli.optional_limit(value)
         with self.assertRaises(argparse.ArgumentTypeError):
             cli.term_code("26")
 
@@ -295,20 +287,20 @@ class ParseArgsTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
-    def test_fetch_prints_title_and_text_and_closes_the_browser(self) -> None:
+    def test_render_prints_title_and_text_and_closes_the_browser(self) -> None:
         html = b"<html><title>Syllabus</title><body><p>Week 1</p></body></html>"
         with (
             mock.patch.object(cli, "sync_playwright") as playwright,
             mock.patch.object(cli, "playwright_renderer", return_value=lambda url: html) as make,
         ):
             browser = playwright.return_value.__enter__.return_value.chromium.launch.return_value
-            args = cli.parse_args(["fetch", "https://example.com", "--settle", "2"])
-            out = quietly(cli.run_fetch, args)
+            args = cli.parse_args(["render", "https://example.com", "--settle", "2"])
+            out = quietly(cli.run_render, args)
         self.assertEqual(out, "Syllabus\nSyllabus\nWeek 1\n")
         make.assert_called_once_with(browser.new_context.return_value, 90000, 2000)
         browser.close.assert_called_once()
 
-    def test_fetch_html_writes_the_rendered_page(self) -> None:
+    def test_render_html_writes_the_rendered_page(self) -> None:
         html = "<html><title>Syllabus</title><body><p>Woche 1: Überblick</p></body></html>"
         with (
             mock.patch.object(cli, "sync_playwright"),
@@ -316,7 +308,7 @@ class RenderTests(unittest.TestCase):
         ):
             stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
             with mock.patch("sys.stdout", stdout):
-                cli.run_fetch(cli.parse_args(["fetch", "--html", "https://example.com"]))
+                cli.run_render(cli.parse_args(["render", "--html", "https://example.com"]))
             self.assertEqual(stdout.buffer.getvalue().decode(), html)
 
 

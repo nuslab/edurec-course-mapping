@@ -1,48 +1,52 @@
 """Navigation of the Course Mapping Approval component through Playwright.
 
-`EduRec` is read-only; `Reviewer` adds what the review stage needs to assist a human
-reviewer without ever pressing an EduRec action button itself.
+`EduRec` is read-only; `ReviewPage` adds what the review stage needs to assist the
+human reviewer without ever pressing an EduRec action button itself.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable, Collection
-from dataclasses import replace
 from pathlib import Path
 from typing import Literal, TypedDict
 from urllib.parse import parse_qs
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import BrowserContext, Frame, Locator, Response
+from playwright.sync_api import Error as PlaywrightError
 
 from .models import (
-    NOT_IN_QUEUE,
-    PENDING,
-    TERM_PATTERN,
-    VERDICT_COLOURS,
+    PENDING_APPROVAL,
     Clicked,
+    GridCounter,
     Listing,
     ListRow,
     Partition,
-    Proposal,
     RangeField,
     Reaction,
     Request,
     Skipped,
     Tab,
     Verdict,
-    display,
-    plain,
 )
-from .parse import DETAIL, GRID, NEXT, VIEW_ALL, can_expand, detail, listing
+from .parse import (
+    DETAIL,
+    GRID,
+    NEXT,
+    VIEW_ALL,
+    approval_status,
+    can_expand,
+    parse_detail,
+    parse_listing,
+)
 
 PREFIX = "N_EXSP_MOD_VW2_"
 SEARCH = "PTS_CFG_CL_WRK_PTS_SRCH_BTN"
 COMPONENT = (
     "https://edurec.nus.edu.sg/psp/cs90prd/EMPLOYEE/SA/c/N_STUDENT_RECORDS.N_EXSP_MOD_APPR.GBL"
 )
+TARGET_FRAME = 'iframe[name="TargetContent"]'
 APPROVAL_FORM = 'form[name="win0"][id="N_EXSP_MOD_APPR"]'
 FIELDS = (
     "EMPLID",
@@ -56,16 +60,19 @@ FIELDS = (
     "N_MOD_APPR_STATUS",
 )
 RANGE_FIELDS = {"STRM", "EMPLID", "TRNSFR_EQVLNCY_GRP", "TRNSFR_EQVLNCY_SEQ"}
-COMMENTS = "N_EXSP_MOD_DT_N_MOD_COMMENTS$0"
+COMMENT_BOX = "N_EXSP_MOD_DT_N_MOD_COMMENTS$0"
 CANCEL = "N_SR_EXT_STD_DW_CANCEL_PB"
 BUTTONS: dict[str, Verdict] = {
     "N_SR_EXT_STD_DW_APPROVE_PB": "approve",
     "N_SR_EXT_STD_DW_REJECT_PB": "reject",
-    "N_SR_EXT_STD_DW_REQUEST_BTN": "request remapping",
-    "N_SR_EXT_STD_DW_MORE_PB": "request for more information",
+    "N_SR_EXT_STD_DW_REQUEST_BTN": "request_remapping",
+    "N_SR_EXT_STD_DW_MORE_PB": "request_more_information",
 }
 """The detail page's action buttons; Cancel posts `#ICList` instead of its own id."""
-REVIEWER_ACTIONS = frozenset({*BUTTONS, "#ICList"})
+BACK_TO_LIST = "#ICList"
+REVIEWER_ACTIONS = frozenset({*BUTTONS, BACK_TO_LIST})
+NOT_IN_QUEUE = "not in approval queue"
+"""The live status of a request that left the approval queue."""
 SKIPPED = "skipped by the reviewer"
 CAP = 300  # Observed server cap; exactly 300 rows is treated as capped.
 ROW_ACTION = re.compile(r"#ICRow\d+")
@@ -73,28 +80,40 @@ SCRIPT = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
 Command = Literal["settled", "signalled", "skipped", "clicked", "comment", "install"]
 
 
-def run(frame: Frame, command: Command, **args: object) -> object:
+def run_script(frame: Frame, command: Command, **args: object) -> object:
     """Run one of `page.js`'s commands in the frame and return its result."""
     return frame.evaluate(SCRIPT, {"command": command, **args})
 
 
-def wait(frame: Frame, command: Command, timeout: float, **args: object) -> None:
+def wait_for_script(frame: Frame, command: Command, timeout: float, **args: object) -> None:
     """Wait until one of `page.js`'s commands returns a truthy value."""
     frame.wait_for_function(SCRIPT, arg={"command": command, **args}, timeout=timeout)
 
 
-class Install(TypedDict):
-    """What `page.js` needs to draw the panel and hook the buttons; see `Reviewer`."""
+class PanelSetup(TypedDict):
+    """What the review stage shows on a detail page; see `ReviewPage.prepare`."""
 
     panel: str
-    buttons: dict[str, str]
-    """EduRec button id -> the verdict it submits, in display form."""
-    cancel: str
-    verdicts: dict[Tab, str | None]
-    prefills: dict[Tab, str]
-    colours: dict[str, str]
+    comments: dict[Tab, str]
+    """The proposal's comment per tab; the fallback only when there is one."""
+    verdicts: dict[Tab, Verdict | None]
+    labels: dict[Verdict, str]
+    colours: dict[Verdict, str]
     dry_run: bool
-    comments: str
+
+
+class Install(TypedDict):
+    """What `page.js` needs to draw the panel and hook the buttons."""
+
+    panel: str
+    buttons: dict[str, Verdict]
+    cancel: str
+    comment_box: str
+    verdicts: dict[Tab, Verdict | None]
+    labels: dict[Verdict, str]
+    prefills: dict[Tab, str]
+    colours: dict[Verdict, str]
+    dry_run: bool
 
 
 class ApprovalNotLoadedError(RuntimeError):
@@ -125,56 +144,30 @@ def mapping_frame(context: BrowserContext) -> Frame:
     return candidates[0]
 
 
-def subdivide(partition: Partition, rows: list[ListRow]) -> list[Partition]:
-    if partition.term_low != partition.term_high:
-        terms = sorted(
-            {int(r.term_code or "") for r in rows if TERM_PATTERN.fullmatch(r.term_code or "")}
-        )
-        if not terms:
-            raise RuntimeError("Cannot partition capped search: no valid four-digit term codes")
-        return partition.split("term", terms[len(terms) // 2])
-    students = sorted(
-        {
-            student
-            for r in rows
-            if (student := r.student_id)
-            and (partition.student_low is None or student > partition.student_low)
-            and (partition.student_high is None or student < partition.student_high)
-        }
-    )
-    if students:
-        pivot = students[len(students) // 2]
-        return [replace(partition, student_high=pivot), replace(partition, student_low=pivot)]
-    # A single student can also exceed the cap. The live form limits mapping
-    # group and sequence to three digits; search those complete domains next.
-    fields: tuple[RangeField, ...] = ("group", "sequence")
-    for field in fields:
-        low, high = partition.bounds(field)
-        if low != high:
-            return partition.split(field, (low + high) // 2)
-    raise RuntimeError(
-        "An indivisible search is still capped; refusing to label truncated output complete"
+def open_component(context: BrowserContext, timeout_ms: float) -> None:
+    page = context.pages[0]
+    page.goto(COMPONENT, timeout=timeout_ms)
+    page.frame_locator(TARGET_FRAME).locator(APPROVAL_FORM).wait_for(
+        state="attached", timeout=timeout_ms
     )
 
 
-def validate_rows(partition: Partition, rows: list[ListRow]) -> None:
-    for row in rows:
-        code, student = row.term_code or "", row.student_id or ""
-        if (
-            not TERM_PATTERN.fullmatch(code)
-            or not partition.contains("term", code)
-            or not student
-            or (partition.student_low is not None and student < partition.student_low)
-            or (partition.student_high is not None and student > partition.student_high)
-        ):
-            raise RuntimeError(
-                "EduRec returned rows outside the requested partition; search may be stale"
-            )
+def ensure_approval(context: BrowserContext, timeout_ms: float) -> None:
+    """Require the approval form, opening the component when only the dashboard is up."""
+    try:
+        mapping_frame(context)
+    except ApprovalNotLoadedError:
+        open_component(context, timeout_ms)
+        mapping_frame(context)
 
 
-def list_identity(page: Listing) -> str:
-    """Fingerprint a results page by its displayed values; row actions change per render."""
-    return json.dumps({**plain(page), "rows": [row.cells() for row in page.rows]}, sort_keys=True)
+def approval_ready(context: BrowserContext) -> bool:
+    """True when exactly one signed-in Course Mapping Approval form is present."""
+    try:
+        mapping_frame(context)
+    except (RuntimeError, PlaywrightError):
+        return False
+    return True
 
 
 class EduRec:
@@ -199,7 +192,7 @@ class EduRec:
     def transition(
         self, action: str, trigger: Callable[[], object] | None = None, target: str | None = None
     ) -> None:
-        allowed = {SEARCH, NEXT, VIEW_ALL, "#ICList", *(PREFIX + f + "$op" for f in FIELDS)}
+        allowed = {SEARCH, NEXT, VIEW_ALL, BACK_TO_LIST, *(PREFIX + f + "$op" for f in FIELDS)}
         if action not in allowed and not ROW_ACTION.fullmatch(action):
             raise ValueError("Action not allowed: " + action)
         frame = self.frame()
@@ -207,19 +200,19 @@ class EduRec:
 
         # State numbers may change before a response has updated the DOM.
         # Await the response for this exact action, then the settled page.
-        with frame.page.expect_response(posted({action}), timeout=self.timeout_ms) as pending:
+        with frame.page.expect_response(posted({action}), timeout=self.timeout_ms) as response:
             if trigger:
                 trigger()
             else:
                 frame.evaluate("a => submitAction_win0(document.win0, a)", action)
-        self.settle(pending.value, old_state, target)
+        self.settle(response.value, old_state, target)
 
     def settle(self, response: Response, old_state: str, target: str | None = None) -> None:
         # No `response.finished()`: the settled wait already implies it, and Playwright leaves
         # its internal task pending, to fail with "Target closed" when the browser closes.
         if response.status >= 400:
             raise RuntimeError(f"EduRec action failed: HTTP {response.status}")
-        wait(self.frame(), "settled", self.timeout_ms, old=old_state, target=target)
+        wait_for_script(self.frame(), "settled", self.timeout_ms, old=old_state, target=target)
 
     def criterion(
         self, field: str, low: str | int | None = None, high: str | int | None = None
@@ -290,14 +283,14 @@ class EduRec:
         page_text = soup.get_text(" ", strip=True)
         cap = re.search(r"Only the first\s+([\d,]+)\s+rows can be displayed", page_text, re.I)
         if soup.find(id=GRID):
-            result = listing(soup)
-            start, end, total = result.span()
-            if len(result.rows) != end - start + 1 or end > total:
+            result = parse_listing(soup)
+            counter = result.span()
+            if len(result.rows) != counter.last - counter.first + 1 or counter.last > counter.total:
                 raise RuntimeError("Result counter and rows disagree")
-            result.capped = bool(cap) or total >= CAP
+            result.capped = bool(cap) or counter.total >= CAP
             return result
         if "No matching values were found." in page_text:
-            return Listing(rows=[], range=(0, 0, 0), has_next=False)
+            return Listing(rows=[], counter=GridCounter(0, 0, 0), has_next=False)
         raise RuntimeError("Neither results nor an explicit no-matches message was found")
 
     def next_page(self) -> Listing:
@@ -305,8 +298,8 @@ class EduRec:
         return self.read_list()
 
     def request(self, row: ListRow) -> Request:
-        self.transition(row.action, target=DETAIL)
-        request = detail(self.soup())
+        self.transition(row.row_action, target=DETAIL)
+        request = parse_detail(self.soup(), row.term_code)
         checks = [
             (row.student_id, request.identity.student_id),
             (row.partner_subject, request.partner_course.subject),
@@ -316,28 +309,25 @@ class EduRec:
         ]
         if any(a and a != b for a, b in checks):
             raise RuntimeError("Detail does not match the selected row")
-        request.term_code = row.term_code
         return request
 
     def back(self) -> Listing:
-        self.transition("#ICList", target=GRID)
+        self.transition(BACK_TO_LIST, target=GRID)
         return self.read_list(expand=True)
 
     def open(self, request: Request) -> Request:
         """Reopen an exported request by its identity; the search must yield exactly one row."""
-        if not request.term_code:
-            raise RuntimeError(f"Request {request.request_id} has no term code to search by")
         if self.soup().find(id=DETAIL) is not None:
             self.back()
         identity = request.identity
         found = self.search(
             Partition(
-                term_low=int(request.term_code),
-                term_high=int(request.term_code),
+                term_low=int(identity.term_code),
+                term_high=int(identity.term_code),
                 student_low=identity.student_id,
                 student_high=identity.student_id,
-                group_low=int(identity.mapping_number),
-                group_high=int(identity.mapping_number),
+                group_low=int(identity.group),
+                group_high=int(identity.group),
                 sequence_low=int(identity.sequence),
                 sequence_high=int(identity.sequence),
             )
@@ -366,7 +356,13 @@ def posted(actions: Collection[str]) -> Callable[[Response], bool]:
     return matches
 
 
-class Reviewer(EduRec):
+def stack(comment: str, existing: str | None) -> str:
+    """`comment` on top of any `existing` text, separated by a blank line."""
+    below = (existing or "").strip()
+    return f"{comment.strip()}\n\n{below}" if below else comment.strip()
+
+
+class ReviewPage(EduRec):
     """Assists the reviewer on a detail page; the reviewer presses EduRec's own buttons.
 
     `prepare` injects the panel and a click hook on the action buttons (see `page.js`).
@@ -382,35 +378,32 @@ class Reviewer(EduRec):
     prior_comment: str = ""
     install: Install
 
-    def prepare(self, proposal: Proposal, panel: str, dry_run: bool) -> None:
+    def prepare(self, setup: PanelSetup) -> None:
+        """Put the recommended comment above the box's text and inject the panel."""
         frame = self.frame()
-        self.prior_comment = frame.locator(f'[id="{COMMENTS}"]').input_value()
-        prefills = proposal.prefills(self.prior_comment)
-        self.comment(prefills["recommended"])
-        # The hook compares and quotes verdicts in their display form only.
-        verdicts: dict[Tab, str | None] = {
-            "recommended": display(proposal.verdict),
-            "fallback": display(proposal.fallback_verdict) if proposal.fallback_verdict else None,
-        }
+        self.prior_comment = frame.locator(f'[id="{COMMENT_BOX}"]').input_value()
+        prefills = {tab: stack(text, self.prior_comment) for tab, text in setup["comments"].items()}
+        self.fill_comment(prefills["recommended"])
         self.install = Install(
-            panel=panel,
-            buttons={id: display(verdict) for id, verdict in BUTTONS.items()},
+            panel=setup["panel"],
+            buttons=BUTTONS,
             cancel=CANCEL,
-            verdicts=verdicts,
+            comment_box=COMMENT_BOX,
+            verdicts=setup["verdicts"],
+            labels=setup["labels"],
             prefills=prefills,
-            colours={display(verdict): colour for verdict, colour in VERDICT_COLOURS.items()},
-            dry_run=dry_run,
-            comments=COMMENTS,
+            colours=setup["colours"],
+            dry_run=setup["dry_run"],
         )
-        run(frame, "install", **self.install, fresh=True)
+        run_script(frame, "install", **self.install, fresh=True)
 
-    def comment(self, value: str) -> None:
-        run(self.frame(), "comment", id=COMMENTS, value=value)
+    def fill_comment(self, value: str) -> None:
+        run_script(self.frame(), "comment", id=COMMENT_BOX, value=value)
 
     def pending_detail(self) -> bool:
         """Whether the frame still shows a detail page in "Pending Approval"."""
         try:
-            return detail(self.soup()).status == PENDING
+            return approval_status(self.soup()) == PENDING_APPROVAL
         except ValueError:
             return False
 
@@ -419,19 +412,19 @@ class Reviewer(EduRec):
         seen: list[Response] = []
         matches = posted(REVIEWER_ACTIONS)
 
-        def collect(response: Response) -> None:
+        def on_response(response: Response) -> None:
             if matches(response):
                 seen.append(response)
 
-        frame.page.on("response", collect)
+        frame.page.on("response", on_response)
         try:
             previous = self.state()
             while True:
-                wait(frame, "signalled", 0, old=previous)
+                wait_for_script(frame, "signalled", 0, old=previous)
                 current = self.state()  # Read before `seen`: a response precedes its DOM update.
-                skipped = run(frame, "skipped")
+                skipped = run_script(frame, "skipped")
                 if skipped is not None:
-                    self.comment(self.prior_comment)
+                    self.fill_comment(self.prior_comment)
                     why = str(skipped).strip()
                     return Skipped(f"{SKIPPED}: {why}" if why else SKIPPED)
                 if seen:
@@ -439,15 +432,16 @@ class Reviewer(EduRec):
                     break
                 if not self.pending_detail():
                     return Skipped("reviewer left the page")
-                run(frame, "install", **self.install, fresh=False)
+                run_script(frame, "install", **self.install, fresh=False)
                 previous = current
         finally:
-            frame.page.remove_listener("response", collect)
+            frame.page.remove_listener("response", on_response)
         form = parse_qs(seen[0].request.post_data or "")
-        hooked = run(frame, "clicked")
+        verdict = BUTTONS.get(form["ICAction"][0])
+        hooked = run_script(frame, "clicked")
         if isinstance(hooked, dict):
-            return Clicked(form["ICAction"][0], hooked["comment"])
-        return Clicked(form["ICAction"][0], form.get(COMMENTS, [None])[0])
+            return Clicked(verdict, hooked["comment"])
+        return Clicked(verdict, form.get(COMMENT_BOX, [None])[0])
 
     def status(self, request: Request) -> str | None:
         """The request's live status: from the open detail, or after reopening it.
@@ -457,8 +451,8 @@ class Reviewer(EduRec):
         """
         soup = self.soup()
         if soup.find(id=DETAIL) is not None:
-            return detail(soup).status
+            return approval_status(soup)
         try:
-            return self.open(request).status
+            return self.open(request).approval_status
         except NotInQueueError:
             return NOT_IN_QUEUE
