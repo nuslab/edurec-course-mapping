@@ -1,16 +1,35 @@
-"""Read-only navigation of the Course Mapping Approval component through Playwright."""
+"""Navigation of the Course Mapping Approval component through Playwright.
+
+`EduRec` is read-only; `Applier` adds what the apply stage needs to assist a human
+reviewer without ever pressing an EduRec action button itself.
+"""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import replace
 from urllib.parse import parse_qs
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import BrowserContext, Frame, Locator, Response
 
-from .models import Listing, ListRow, Partition, RangeField, Request, as_dict
+from .models import (
+    NOT_IN_QUEUE,
+    PENDING,
+    Clicked,
+    Decision,
+    Left,
+    Listing,
+    ListRow,
+    Outcome,
+    Partition,
+    RangeField,
+    Request,
+    Skipped,
+    Verdict,
+    as_dict,
+)
 from .parse import DETAIL, GRID, NEXT, VIEW_ALL, detail, digest, expand_action, listing
 
 PREFIX = "N_EXSP_MOD_VW2_"
@@ -31,6 +50,16 @@ FIELDS = (
     "N_MOD_APPR_STATUS",
 )
 RANGE_FIELDS = {"STRM", "EMPLID", "TRNSFR_EQVLNCY_GRP", "TRNSFR_EQVLNCY_SEQ"}
+COMMENTS = "N_EXSP_MOD_DT_N_MOD_COMMENTS$0"
+CANCEL = "N_SR_EXT_STD_DW_CANCEL_PB"
+BUTTONS: dict[str, Verdict] = {
+    "N_SR_EXT_STD_DW_APPROVE_PB": "approve",
+    "N_SR_EXT_STD_DW_REJECT_PB": "reject",
+    "N_SR_EXT_STD_DW_REQUEST_BTN": "request remapping",
+    "N_SR_EXT_STD_DW_MORE_PB": "request for more information",
+}
+"""The detail page's action buttons; Cancel posts `#ICList` instead of its own id."""
+REVIEWER_ACTIONS = frozenset({*BUTTONS, "#ICList"})
 CAP = 300  # Observed server cap; exactly 300 rows is treated as capped.
 TERM_PATTERN = re.compile(r"\d{4}")
 ROW_ACTION = re.compile(r"#ICRow\d+")
@@ -39,6 +68,61 @@ SETTLED = """({old, target}) => {
     return state && state.value !== old &&
         !(typeof isLoaderInProcess === 'function' && isLoaderInProcess()) &&
         (!target || document.getElementById(target));
+}"""
+# The reviewer pressed the panel's Skip, or the state changed: an EduRec button was
+# pressed, or PeopleSoft re-rendered the page on an innocuous interaction.
+SIGNALLED = """(old) => {
+    const apply = window.__edurecApply;
+    const state = document.getElementById('ICStateNum');
+    return !!(apply && apply.skipped) || !!(state && state.value !== old);
+}"""
+SKIPPED = "() => !!(window.__edurecApply || {}).skipped"
+SET_COMMENT = """({id, value}) => {
+    const box = document.getElementById(id);
+    if (!box) throw new Error('Comment box not found');
+    box.value = value;
+    for (const type of ['input', 'change']) box.dispatchEvent(new Event(type, {bubbles: true}));
+}"""
+INSTALL = """({panel, buttons, cancel, recommended, verdict, dryRun, comments}) => {
+    window.__edurecApply?.unhook();
+    const hooks = [];
+    const apply = window.__edurecApply = {
+        skipped: false, clicked: null,
+        unhook: () => hooks.forEach(([b, h]) => b.removeEventListener('click', h, true)),
+    };
+    const box = document.getElementById(comments);
+    document.getElementById('edurec-apply-panel')?.remove();
+    const div = document.createElement('div');
+    div.id = 'edurec-apply-panel';
+    div.innerHTML = panel;
+    document.body.appendChild(div);
+    document.getElementById('edurec-apply-skip').onclick = () => { apply.skipped = true; };
+    for (const id of [...buttons, cancel]) {
+        const button = document.getElementById(id);
+        if (!button) continue;
+        if (id !== cancel) {
+            button.disabled = dryRun;
+            button.style.outline = id === recommended ? '3px solid #2e7d32' : '';
+        }
+        const hook = event => {
+            if (dryRun && buttons.includes(id)) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                window.alert('Dry run: nothing is submitted');
+                return;
+            }
+            if (buttons.includes(id) && id !== recommended) {
+                if (!window.confirm(`Recommended: ${verdict}. Submit ${button.value} anyway?`)) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    return;
+                }
+            }
+            apply.clicked = {id, comment: box ? box.value : null};
+        };
+        button.addEventListener('click', hook, true);
+        hooks.push([button, hook]);
+    }
 }"""
 
 
@@ -115,7 +199,7 @@ def list_identity(page: Listing) -> str:
 
 
 class EduRec:
-    """Drives the approval component. Only search, paging, open and return actions exist."""
+    """Drives the approval component read-only: search, paging, open and return actions."""
 
     def __init__(self, context: BrowserContext, timeout: float = 60) -> None:
         self.context = context
@@ -130,6 +214,9 @@ class EduRec:
     def soup(self) -> BeautifulSoup:
         return BeautifulSoup(self.frame().content(), "html.parser")
 
+    def state(self) -> str:
+        return self.frame().locator('[id="ICStateNum"]').input_value()
+
     def transition(
         self, action: str, trigger: Callable[[], object] | None = None, target: str | None = None
     ) -> None:
@@ -137,26 +224,22 @@ class EduRec:
         if action not in allowed and not ROW_ACTION.fullmatch(action):
             raise ValueError("Action not allowed: " + action)
         frame = self.frame()
-        old_state = frame.locator('[id="ICStateNum"]').input_value()
+        old_state = self.state()
 
         # State numbers may change before a response has updated the DOM.
         # Await the response for this exact action, then the settled page.
-        def response_matches(response: Response) -> bool:
-            request = response.request
-            return request.method == "POST" and parse_qs(request.post_data or "").get(
-                "ICAction"
-            ) == [action]
-
-        with frame.page.expect_response(response_matches, timeout=self.timeout) as pending:
+        with frame.page.expect_response(posted({action}), timeout=self.timeout) as pending:
             if trigger:
                 trigger()
             else:
                 frame.evaluate("a => submitAction_win0(document.win0, a)", action)
-        response = pending.value
+        self.settle(pending.value, old_state, target)
+
+    def settle(self, response: Response, old_state: str, target: str | None = None) -> None:
         response.finished()
         if response.status >= 400:
             raise RuntimeError(f"EduRec action failed: HTTP {response.status}")
-        frame.wait_for_function(
+        self.frame().wait_for_function(
             SETTLED, arg={"old": old_state, "target": target}, timeout=self.timeout
         )
 
@@ -260,3 +343,153 @@ class EduRec:
     def back(self) -> Listing:
         self.transition("#ICList", target=GRID)
         return self.read_list(expand=True)
+
+    def open(self, request: Request) -> Request:
+        """Reopen an exported request by its identity; the search must yield exactly one row."""
+        if not request.term_code:
+            raise RuntimeError(f"Request {request.request_id} has no term code to search by")
+        if self.soup().find(id=DETAIL) is not None:
+            self.back()
+        identity = request.identity
+        found = self.search(
+            Partition(
+                term_low=int(request.term_code),
+                term_high=int(request.term_code),
+                student_low=identity.student_id,
+                student_high=identity.student_id,
+                group_low=int(identity.mapping_number),
+                group_high=int(identity.mapping_number),
+                sequence_low=int(identity.sequence),
+                sequence_high=int(identity.sequence),
+            )
+        )
+        if not found.rows:
+            raise NotInQueueError(
+                f"Request {request.request_id} is no longer in the approval queue"
+            )
+        if len(found.rows) != 1:
+            raise RuntimeError(
+                f"Request {request.request_id} matched {len(found.rows)} rows instead of one"
+            )
+        return self.request(found.rows[0])
+
+
+class NotInQueueError(RuntimeError):
+    """The request's identity search found no row: it left the approval queue."""
+
+
+def button_for(verdict: Verdict) -> str:
+    return next(button for button, value in BUTTONS.items() if value == verdict)
+
+
+def posted(actions: Collection[str]) -> Callable[[Response], bool]:
+    """Match the PeopleSoft postback whose `ICAction` is one of `actions`."""
+
+    def matches(response: Response) -> bool:
+        request = response.request
+        if request.method != "POST":
+            return False
+        action = parse_qs(request.post_data or "").get("ICAction", [])
+        return len(action) == 1 and action[0] in actions
+
+    return matches
+
+
+class Applier(EduRec):
+    """Assists the reviewer on a detail page; the reviewer presses EduRec's own buttons.
+
+    How the click is detected: `prepare` injects the decision panel and a
+    capture-phase click hook on the five buttons. The hook only observes: it
+    records the button id and the comment box's value, asks for confirmation
+    when the verdict differs from the recommendation, and in a dry run the
+    action buttons are disabled and their clicks blocked outright. `await_action`
+    collects the page's responses and waits until either the panel's Skip flag
+    is set or `ICStateNum` changes, which only a PeopleSoft postback does. The
+    posted `ICAction` of the collected response, not the hook, says which button
+    was pressed, so nothing is missed when the postback races the hook's report,
+    and a dismissed unsaved-changes dialog on Cancel leaves the wait intact.
+
+    PeopleSoft also re-renders the page on innocuous interactions (collapsing a
+    section, sorting a grid, tabbing out of a changed field), which strips the
+    panel, the hook and the dry-run state. A state change without a recognised
+    post is therefore not an error: while the detail still shows as pending the
+    panel and hook are re-installed (the comment box keeps its current text) and
+    the wait resumes; once the detail is gone the outcome is `Left`.
+    """
+
+    prior_comment: str = ""
+    install: dict[str, object]
+
+    def prepare(self, decision: Decision, panel: str, dry_run: bool) -> str:
+        frame = self.frame()
+        self.prior_comment = frame.locator(f'[id="{COMMENTS}"]').input_value()
+        prefilled = decision.prefill(self.prior_comment)
+        self.comment(prefilled)
+        self.install = {
+            "panel": panel,
+            "buttons": list(BUTTONS),
+            "cancel": CANCEL,
+            "recommended": button_for(decision.verdict),
+            "verdict": decision.verdict,
+            "dryRun": dry_run,
+            "comments": COMMENTS,
+        }
+        frame.evaluate(INSTALL, self.install)
+        return prefilled
+
+    def comment(self, value: str) -> None:
+        # No inline onchange: dispatch the events PeopleSoft's delegated handlers listen for.
+        self.frame().evaluate(SET_COMMENT, {"id": COMMENTS, "value": value})
+
+    def pending_detail(self) -> bool:
+        """Whether the frame still shows a detail page in "Pending Approval"."""
+        try:
+            return detail(self.soup()).status == PENDING
+        except ValueError:
+            return False
+
+    def await_action(self) -> Outcome:
+        frame = self.frame()
+        seen: list[Response] = []
+        matches = posted(REVIEWER_ACTIONS)
+
+        def collect(response: Response) -> None:
+            if matches(response):
+                seen.append(response)
+
+        frame.page.on("response", collect)
+        try:
+            previous = self.state()
+            while True:
+                frame.wait_for_function(SIGNALLED, arg=previous, timeout=0)
+                current = self.state()  # Read before `seen`: a response precedes its DOM update.
+                if frame.evaluate(SKIPPED):
+                    self.comment(self.prior_comment)
+                    return Skipped()
+                if seen:
+                    self.settle(seen[0], previous)
+                    break
+                if not self.pending_detail():
+                    return Left()
+                frame.evaluate(INSTALL, self.install)
+                previous = current
+        finally:
+            frame.page.remove_listener("response", collect)
+        form = parse_qs(seen[0].request.post_data or "")
+        hooked = frame.evaluate("() => (window.__edurecApply || {}).clicked")
+        comment = hooked["comment"] if isinstance(hooked, dict) else form.get(COMMENTS, [None])[0]
+        return Clicked(form["ICAction"][0], comment)
+
+    def status(self, request: Request) -> str | None:
+        """The request's live status: from the open detail, or after reopening it.
+
+        A submission that removed the request from the approval queue (Request
+        Remapping, Request More Information) reports `NOT_IN_QUEUE`.
+        """
+        soup = self.soup()
+        if soup.find(id=DETAIL) is not None:
+            return detail(soup).status
+        try:
+            return self.open(request).status
+        except NotInQueueError:
+            return NOT_IN_QUEUE

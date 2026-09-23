@@ -46,6 +46,22 @@ class DocumentTests(unittest.TestCase):
         )
         self.assertTrue(direct_url(partner.supporting_url or "").endswith("&dl=1"))
         self.assertEqual(direct_url("https://example.org/a?x=1"), "https://example.org/a?x=1")
+        self.assertEqual(
+            direct_url("https://drive.google.com/file/d/1-GlZKPY_x/view?usp=sharing"),
+            "https://drive.google.com/uc?export=download&id=1-GlZKPY_x",
+        )
+        self.assertEqual(
+            direct_url("https://docs.google.com/document/d/1yWVPs/edit"),
+            "https://docs.google.com/document/d/1yWVPs/export?format=txt",
+        )
+        self.assertEqual(
+            direct_url("https://docs.google.com/presentation/d/abc/edit#slide=1"),
+            "https://docs.google.com/presentation/d/abc/export?format=pdf",
+        )
+        self.assertEqual(
+            direct_url("https://drive.google.com/drive/folders/xyz"),
+            "https://drive.google.com/drive/folders/xyz",
+        )
 
     def test_pdf_html_and_failures_are_recorded(self):
         request = detail(fixture("individual.html"))
@@ -104,3 +120,40 @@ class DocumentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_script_shells_are_rendered_when_a_renderer_is_given(self):
+        request = detail(fixture("individual.html"))
+        request.partner_course.other_information = (
+            "https://example.org/shell https://example.org/broken-shell https://example.org/full"
+        )
+        shell = b"<html><head><title>Loading</title></head><body><img src=l.gif></body></html>"
+        full = b"<html><body>" + b"<p>Week one outline</p>" * 100 + b"</body></html>"
+        rendered = []
+
+        def fetch(url):
+            if "dropbox" in url:
+                return 200, "application/pdf", pdf_bytes("Syllabus week one")
+            return 200, "text/html", full if url.endswith("/full") else shell
+
+        def render(url):
+            rendered.append(url)
+            if url.endswith("/broken-shell"):
+                raise TimeoutError("navigation timed out")
+            return (
+                b"<html><head><title>DATA303</title></head><body>"
+                b"<p>Course Schedule per Week</p><p>Variational Autoencoder</p></body></html>"
+            )
+
+        fetch_documents(request, fetch, {}, render)
+        docs = {d.url.rsplit("/", 1)[-1]: d for d in request.linked_documents or []}
+        # Only short HTML pages are rendered; the PDF and the full page are not.
+        self.assertEqual(
+            rendered, ["https://example.org/shell", "https://example.org/broken-shell"]
+        )
+        self.assertEqual(docs["shell"].status, "fetched")
+        self.assertEqual(docs["shell"].title, "DATA303")
+        self.assertIn("Variational Autoencoder", docs["shell"].text or "")
+        # A failed render keeps what the plain fetch returned.
+        broken = docs["broken-shell"]
+        self.assertEqual((broken.status, broken.text), ("fetched", "Loading"))
+        self.assertIn("Week one outline", docs["full"].text or "")

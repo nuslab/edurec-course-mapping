@@ -1,8 +1,10 @@
 # edurec-mappings
 
 Read-only extraction of NUS EduRec **Course Mapping Approval** requests into
-a run directory of YAML files. Stage 1 only: the package collects structured evidence, optionally the
-text of linked syllabus documents, and never records decisions or comments.
+a run directory of YAML files. The package collects structured evidence, optionally the
+text of linked syllabus documents, and never decides anything itself. Its
+`apply` stage (below) walks a human reviewer through the advisor's decisions in
+EduRec; the reviewer presses EduRec's buttons, the program only watches and logs.
 
 ## Layout
 
@@ -17,6 +19,7 @@ edurec-mappings/
 │   ├── parse.py              # list/detail HTML parsing into those records
 │   ├── documents.py          # download and text extraction of URLs in course details
 │   ├── anonymize.py          # pseudonymised copy of an export
+│   ├── apply.py              # reviewer walk-through of the decisions, with applied.yaml log
 │   └── terms.yaml            # terms searched when --term is blank
 └── tests/                    # unittest suite; fixtures/ holds trimmed EduRec pages
 
@@ -53,7 +56,12 @@ policy if you agree. The command
 runs three steps once the approval form is visible (detected automatically after login; Enter retries at once): it applies its own search filters, switches the results grid
 to **View 100**, opens every matching request and checkpoints the run
 directory after each detail; with `--scrape-urls` it then fetches every URL
-found in the course details and stores their text under `documents/`; with
+found in the course details and stores their text under `documents/` (an HTML
+page whose text is under 1,000 characters is re-read in a browser page so that
+script-rendered catalogues such as Korea University, NYCU and TUMonline yield
+their content rather than a loading shell; Google Drive file links and Google
+Docs links are fetched through their download and export endpoints, which
+serve files shared with anyone without a sign-in); with
 `--anonymize` it finally writes a pseudonymised copy of the run next to it.
 
 | Argument | Supplied | Blank or omitted |
@@ -66,6 +74,12 @@ found in the course details and stores their text under `documents/`; with
 | `--cdp-url URL --ready` | Attach to a running, logged-in Chromium; left open on exit | Launch a browser on `--profile` and prompt for login |
 
 `--help` lists the rest (`--profile`, `--proxy`, `--timeout`).
+
+`edurec-mappings render URL` prints the title and text of one page after its
+scripts have run, in a fresh headless browser without login (`--proxy`,
+`--timeout`, `--settle` seconds after network idle). It is for the reviewer or
+the course-mapping advisor to retry a link that an older export recorded as a
+stub or failure.
 
 ## Why searches are subdivided
 
@@ -89,7 +103,8 @@ module-mappings/
 ├── inventory.yaml            # collection audit, mapping_groups, list_pages
 ├── requests/<request_id>.yaml   # one file per unique request
 ├── documents/<hash>.txt      # scraped text, one file per URL (--scrape-urls)
-└── decisions/<request_id>.yaml  # written by the course-mapping advisor, not by this package
+├── decisions/<request_id>.yaml  # written by the course-mapping advisor, not by this package
+└── decisions/applied.yaml    # written by `edurec-mappings apply`
 ```
 
 Starting a run removes the first three entries from the directory and leaves
@@ -130,10 +145,70 @@ within the copy, drops student names and user IDs, and sets
 `collection.anonymized: true`. The salt is random per run and never stored, so
 pseudonyms cannot be reversed or matched across exports.
 
+## Apply
+
+Once the advisor has written `decisions/` inside the anonymized copy, submit
+them in EduRec yourself with the program as a guide. Try `--dry-run` first: it
+walks the same queue with the action buttons disabled, so you can read the
+panels and check the pre-filled comments without submitting anything.
+
+```sh
+edurec-mappings apply --run ../edurec-data/output/module-mappings --dry-run
+edurec-mappings apply --run ../edurec-data/output/module-mappings
+```
+
+`--decisions` defaults to `<run>-anonymized/decisions`; `--request-id` and
+`--verdict` (repeatable) narrow the queue; the browser options are the same as
+for extraction. Decisions made from another export (their `source_started_at`
+differs from the inventory) or without a request file are reported and never
+offered.
+
+For each queued request the program searches EduRec by the request's identity,
+opens the detail, checks that it is still `Pending Approval` and still shows
+the exported courses, mapping number and sequence, pre-fills the comment box
+with the decision's comment on top of any existing comment (EduRec replaces
+the field, so the earlier text is kept below it), and injects a panel on the right with the
+recommended verdict (its EduRec button gets a green outline), overlap,
+confidence, topic lists, concerns, remapping analysis, sibling parts of a
+many-to-one mapping with their logged outcome, and the queue position. You then
+edit the comment if you wish and press one of EduRec's own buttons, or the
+panel's **Skip**. Choosing a button other than the recommended one asks for
+confirmation; Cancel counts as a skip. The program never presses an action
+button. After your click it waits for the postback, re-reads the status and
+moves on. A request that no longer appears in the approval queue (Request
+Remapping and Request More Information remove it) is logged with status
+`not in approval queue` and counts as verified; if the status is still
+`Pending Approval` the session stops rather than guessing. A comment that is
+empty or still contains `[` or `XXXX` is skipped without being entered.
+
+PeopleSoft re-renders the page on many harmless interactions (collapsing a
+section, sorting a grid, tabbing out of a changed field), which removes the
+panel and the click hook. The program notices, re-installs them with the
+comment box left as you had it, and keeps waiting; the dry-run buttons are
+disabled again too. If the detail page goes away without a recognised button
+(you navigated elsewhere), the request is logged as a skip with reason
+"reviewer left the page". A request that already left the queue before it was
+opened is logged as a skip and the session continues.
+
+Only clicks made while the panel is shown are logged. When the session stops
+on an error it closes the browser instead of leaving the page open, because a
+click on an unwatched page would go unrecorded; do not act in EduRec after the
+program has stopped.
+
+Every outcome is appended to `decisions/applied.yaml` before the next request
+opens: request id, recommended verdict, the action taken (a verdict or
+`skip`), the comment as submitted and whether it was edited, status before and
+after, timestamp, dry-run flag and a reason for skips or unverified
+submissions. Requests logged with a verdict are never offered again, including
+unverified ones; skipped requests are offered on the next session. Parts of a
+many-to-one mapping are queued consecutively and the panel warns when a
+sibling was already submitted with a different action.
+
 ## Guarantees and limits
 
-- Only search, row-open, list-return, next-page and view-size actions exist in
-  code. No comments, decisions or saves.
+- Extraction only uses search, row-open, list-return, next-page and view-size
+  actions. `apply` additionally sets the comment box and waits for a click; it
+  never triggers an EduRec action button itself.
 - With `--scrape-urls`, URLs in the supporting URL, synopsis, other
   information, prerequisites and comments are fetched through the browser
   session. PDFs are read with pypdf, HTML and text with BeautifulSoup, and

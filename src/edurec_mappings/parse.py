@@ -7,9 +7,11 @@ import json
 import re
 import shutil
 from collections.abc import Callable, Iterable
+from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypeVar
+from types import UnionType
+from typing import Any, TypeVar, Union, cast, get_args, get_origin, get_type_hints
 
 import yaml
 from bs4 import BeautifulSoup, Tag
@@ -59,6 +61,27 @@ def text(node: PageElement | None) -> str | None:
     return clean(node.get_text()) if node else None
 
 
+def hydrate(cls: type[T], data: object) -> T:
+    """Rebuild a record from its `plain` form: nested records, lists of them, `X | None`."""
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a mapping for {cls.__name__}, got {type(data).__name__}")
+    hints = get_type_hints(cls)
+    names = [f.name for f in fields(cast(Any, cls)) if f.name in data]
+    return cls(**{name: value_of(hints[name], data[name]) for name in names})
+
+
+def value_of(hint: object, value: object) -> object:
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        members = [member for member in get_args(hint) if member is not type(None)]
+        return None if value is None else value_of(members[0], value)
+    if origin is list and isinstance(value, list):
+        return [value_of(get_args(hint)[0], item) for item in value]
+    if isinstance(hint, type) and is_dataclass(hint):
+        return hydrate(hint, value)
+    return value
+
+
 def digest(value: object) -> str:
     return hashlib.sha256(json.dumps(plain(value), sort_keys=True).encode()).hexdigest()[:24]
 
@@ -87,10 +110,11 @@ def listing(soup: BeautifulSoup) -> Listing:
         rows.append(ListRow(**values, action=action[0]))
     counter = soup.find(id="win0divPTS_CFG_CL_STD_RSLGP$0")
     counter = counter.select_one(".PSGRIDCOUNTER") if isinstance(counter, Tag) else None
-    match = re.search(r"(\d+)\s*-\s*(\d+)\s+of\s+(\d+)", text(counter) or "")
+    # A single row is counted "1 of 1"; longer pages "1-100 of 300".
+    match = re.search(r"(\d+)(?:\s*-\s*(\d+))?\s+of\s+(\d+)", text(counter) or "")
     return Listing(
         rows=rows,
-        range=(int(match[1]), int(match[2]), int(match[3])) if match else None,
+        range=(int(match[1]), int(match[2] or match[1]), int(match[3])) if match else None,
         has_next=soup.find("a", id=NEXT) is not None,
     )
 

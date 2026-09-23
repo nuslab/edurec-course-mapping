@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 from bs4 import BeautifulSoup
 
-from edurec_mappings.parse import detail, document, listing, reset, save
+from edurec_mappings.parse import GRID, detail, document, listing, reset, save
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -114,3 +114,13 @@ class ExtractionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_single_row_counter_has_no_range_dash():
+    html = (
+        '<div id="win0divPTS_CFG_CL_STD_RSLGP$0"><span class="PSGRIDCOUNTER">1 of 1</span></div>'
+        f'<table id="{GRID}"><tr onclick="x(\'#ICRow0\')">' + "<td>a</td>" * 14 + "</tr></table>"
+    )
+    page = listing(BeautifulSoup(html, "html.parser"))
+    assert page.range == (1, 1, 1)
+    assert len(page.rows) == 1

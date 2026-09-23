@@ -10,7 +10,8 @@ The records fall into three groups:
   documents, and the identity that reopens the request in EduRec.
 - `Collection`, `SearchAudit`, `ListPage` and `MappingGroup` are the extraction
   audit that lets an export say whether it is complete.
-- `Decision` is the AI course mapping advisor's verdict on one request.
+- `Decision` is the AI course mapping advisor's verdict on one request, and
+  `Applied` records what the human reviewer then did with it in EduRec.
 """
 
 from __future__ import annotations
@@ -27,8 +28,12 @@ SupportingDocumentStatus = Literal["not_provided", "not_fetched", FetchStatus]
 Completeness = Literal["single_mapping", "unverified"]
 Verdict = Literal["approve", "reject", "request remapping", "request for more information"]
 Confidence = Literal["high", "medium", "low"]
+Action = Literal[Verdict, "skip"]
 
 MANY_TO_ONE = "Many to One"
+PENDING = "Pending Approval"
+NOT_IN_QUEUE = "not in approval queue"
+"""`Applied.status_after` when a submission removed the request from the approval queue."""
 
 LIST_COLUMNS = (
     "user_id",
@@ -402,9 +407,69 @@ class Decision:
     concerns: list[str] = field(default_factory=list)
     remap_target: str | None = None
     remap_analysis: str | None = None
+    fallback_verdict: Verdict | None = None
+    """For the reviewer only, never applied: the verdict a reviewer who disagrees
+    with `verdict` would most likely reach. Set only on close calls."""
+    fallback_comment: str | None = None
+    """Complete EduRec text for `fallback_verdict`, following its template."""
+    fallback_rationale: str | None = None
+    """Why the fallback is defensible, or why no alternative is (when the verdict is null)."""
+
+    def prefill(self, existing: str | None) -> str:
+        """The comment box content: EduRec replaces the field, so the decision's
+        comment goes on top and any existing text is kept below it."""
+        below = (existing or "").strip()
+        return f"{self.comment.strip()}\n\n{below}" if below else self.comment.strip()
 
     def to_dict(self) -> dict[str, object]:
         return as_dict(self)
+
+
+@dataclass
+class Applied:
+    """`decisions/applied.yaml` entry: the outcome of showing one decision to the reviewer.
+
+    `action` is the EduRec button the reviewer pressed, or `skip` when the request
+    was passed over (by the reviewer, by a freshness check, or in a dry run);
+    `reason` says why. A non-skip entry is never offered again.
+    """
+
+    request_id: str
+    verdict_recommended: Verdict
+    action: Action
+    comment_submitted: str | None
+    comment_edited: bool
+    """True when the submitted comment differs from the decision's comment."""
+    status_before: str | None
+    status_after: str | None
+    applied_at: str
+    dry_run: bool
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return as_dict(self)
+
+
+# --- Reviewer outcomes ---------------------------------------------------------------------
+
+
+class Clicked(NamedTuple):
+    """The reviewer's click on the detail page, as the posted `ICAction` and the comment box."""
+
+    action: str
+    """A `browser.BUTTONS` id, or `#ICList` when Cancel returned to the list."""
+    comment: str | None
+
+
+class Skipped(NamedTuple):
+    """The panel's Skip was pressed; the comment box is restored."""
+
+
+class Left(NamedTuple):
+    """The detail page went away without a recognised action, e.g. the reviewer navigated off."""
+
+
+Outcome = Clicked | Skipped | Left
 
 
 class Fetched(NamedTuple):
