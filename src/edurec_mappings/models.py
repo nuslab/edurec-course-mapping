@@ -16,8 +16,20 @@ The records fall into three groups:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from typing import Literal, NamedTuple, cast
+from types import UnionType
+from typing import (
+    Any,
+    Literal,
+    NamedTuple,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 RangeField = Literal["term", "group", "sequence"]
 CollectionStatus = Literal["in_progress", "complete", "row_limit_reached", "interrupted"]
@@ -33,33 +45,27 @@ Tab = Literal["recommended", "fallback"]
 """The panel's comment tabs; the fallback exists only when the decision names one."""
 CommentSource = Literal[Tab, "edited"]
 
+TERM_PATTERN = re.compile(r"\d{4}")
+"""A four-digit EduRec term code, e.g. 2620."""
 MANY_TO_ONE = "Many to One"
 PENDING = "Pending Approval"
 NOT_IN_QUEUE = "not in approval queue"
 """`Applied.status_after` when a submission removed the request from the approval queue."""
 
 
+GREEN, AMBER, RED = "#2e7d32", "#ef6c00", "#c62828"
+VERDICT_COLOURS: dict[Verdict, str] = {
+    "approve": GREEN,
+    "reject": RED,
+    "request remapping": AMBER,
+    "request for more information": AMBER,
+}
+"""Colour of the verdict pill and of the matching EduRec button's outline."""
+
+
 def display(value: str) -> str:
     """The panel's form of a verdict or confidence: "request remapping" -> "Request Remapping"."""
     return value.title()
-
-
-LIST_COLUMNS = (
-    "user_id",
-    "submitted_at",
-    "student_id",
-    "student_name",
-    "institution",
-    "academic_career",
-    "term_code",
-    "study_program",
-    "partner_university",
-    "partner_subject",
-    "partner_number",
-    "nus_subject",
-    "nus_number",
-    "reassigned_to",
-)
 
 
 def plain(value: object) -> object:
@@ -82,6 +88,30 @@ def plain(value: object) -> object:
 
 def as_dict(value: object) -> dict[str, object]:
     return cast("dict[str, object]", plain(value))
+
+
+T = TypeVar("T")
+
+
+def hydrate(cls: type[T], data: object) -> T:
+    """Rebuild a record from its `plain` form: nested records, lists of them, `X | None`."""
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a mapping for {cls.__name__}, got {type(data).__name__}")
+    hints = get_type_hints(cls)
+    names = [f.name for f in fields(cast(Any, cls)) if f.name in data]
+    return cls(**{name: value_of(hints[name], data[name]) for name in names})
+
+
+def value_of(hint: object, value: object) -> object:
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        members = [member for member in get_args(hint) if member is not type(None)]
+        return None if value is None else value_of(members[0], value)
+    if origin is list and isinstance(value, list):
+        return [value_of(get_args(hint)[0], item) for item in value]
+    if isinstance(hint, type) and is_dataclass(hint):
+        return hydrate(hint, value)
+    return value
 
 
 # --- Search and results grid -------------------------------------------------------------
@@ -152,6 +182,10 @@ class ListRow:
     def cells(self) -> dict[str, str | None]:
         """The displayed values, without the render-specific action."""
         return {name: getattr(self, name) for name in LIST_COLUMNS}
+
+
+LIST_COLUMNS = tuple(f.name for f in fields(ListRow) if f.name != "action")
+"""The grid's columns, left to right: `ListRow` declares its fields in display order."""
 
 
 @dataclass
@@ -302,7 +336,6 @@ class Filters:
     """Requested scope; None means no restriction on that criterion."""
 
     reassign_id: str | None = None
-    term: str | None = None
     terms: list[str] | None = None
     rows: int | None = None
     mapping_status: str = "all_available"
@@ -371,7 +404,7 @@ class Document:
     document text goes under `documents/`.
     """
 
-    schema_version: int = 3
+    schema_version: int = 4
     collection: Collection
     list_pages: list[ListPage] = field(default_factory=list)
     requests: list[Request] = field(default_factory=list)
@@ -436,9 +469,6 @@ class Decision:
             result["fallback"] = stack(self.fallback_comment or "", existing)
         return result
 
-    def to_dict(self) -> dict[str, object]:
-        return as_dict(self)
-
 
 def stack(comment: str, existing: str | None) -> str:
     """`comment` on top of any `existing` text, separated by a blank line."""
@@ -469,9 +499,6 @@ class Applied:
     comment_source: CommentSource | None = None
     """Which pre-filled comment was submitted, or `edited` when the box differed from it;
     None for skips."""
-
-    def to_dict(self) -> dict[str, object]:
-        return as_dict(self)
 
 
 # --- Reviewer outcomes ---------------------------------------------------------------------

@@ -5,7 +5,9 @@ from pathlib import Path
 import yaml
 from bs4 import BeautifulSoup
 
-from edurec_mappings.parse import GRID, detail, document, listing, reset, save
+from edurec_mappings.models import LIST_COLUMNS
+from edurec_mappings.parse import GRID, detail, listing
+from edurec_mappings.store import document, reset, save
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -77,7 +79,7 @@ class ExtractionTests(unittest.TestCase):
             inventory = yaml.safe_load((run / "inventory.yaml").read_text())
             self.assertEqual(inventory, data.inventory())
             self.assertNotIn("requests", inventory, "Requests live in one file each")
-            self.assertEqual(inventory["schema_version"], 3)
+            self.assertEqual(inventory["schema_version"], 4)
             self.assertEqual(inventory["mapping_groups"][0]["completeness"], "unverified")
             (path,) = (run / "requests").iterdir()
             self.assertEqual(path.name, f"{data.requests[0].request_id}.yaml")
@@ -124,3 +126,27 @@ def test_single_row_counter_has_no_range_dash():
     page = listing(BeautifulSoup(html, "html.parser"))
     assert page.range == (1, 1, 1)
     assert len(page.rows) == 1
+
+
+class ListColumnsTests(unittest.TestCase):
+    def test_columns_follow_the_grid_order(self):
+        # `listing` zips cells with LIST_COLUMNS, so ListRow's field order is the grid's.
+        self.assertEqual(
+            LIST_COLUMNS,
+            (
+                "user_id",
+                "submitted_at",
+                "student_id",
+                "student_name",
+                "institution",
+                "academic_career",
+                "term_code",
+                "study_program",
+                "partner_university",
+                "partner_subject",
+                "partner_number",
+                "nus_subject",
+                "nus_number",
+                "reassigned_to",
+            ),
+        )

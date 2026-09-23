@@ -16,6 +16,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from pypdf import PdfReader
 
 from .models import Document, DocumentKind, Fetched, LinkedDocument, Request
+from .store import DOCUMENTS
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'　]+", re.I)
 TRAILING = ".,;:!?)]}>'\""
@@ -169,7 +170,7 @@ def fetch_document(url: str, fetch: Fetcher, render: Renderer | None = None) -> 
             record.error = f"Extracted text exceeds {MAX_TEXT_BYTES} bytes"
         else:
             record.status, record.text = "fetched", extracted.text
-            record.path = f"documents/{document_name(url)}"
+            record.path = f"{DOCUMENTS}/{document_name(url)}"
     except Exception as error:
         record.error = str(error).splitlines()[0] if str(error) else type(error).__name__
     return record

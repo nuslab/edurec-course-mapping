@@ -12,7 +12,8 @@ Only clicks made while the panel is shown are observed and logged.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from html import escape
@@ -22,9 +23,13 @@ from typing import NamedTuple, Protocol
 import yaml
 
 from .anonymize import anonymized_path
-from .browser import BUTTONS, VERDICT_COLOURS, NotInQueueError
+from .browser import BUTTONS, NotInQueueError
 from .models import (
+    AMBER,
+    GREEN,
     PENDING,
+    RED,
+    VERDICT_COLOURS,
     Applied,
     CommentSource,
     Confidence,
@@ -35,9 +40,10 @@ from .models import (
     Skipped,
     Tab,
     display,
+    hydrate,
     plain,
 )
-from .parse import INVENTORY, REQUESTS, dump, hydrate, now, write_atomic
+from .store import INVENTORY, REQUESTS, dump, now, write_atomic
 
 DECISIONS = "decisions"
 APPLIED = "applied.yaml"
@@ -87,11 +93,29 @@ background:#fff}
 button{padding:4px 10px;font:inherit;cursor:pointer}
 #reason{flex:1;font:inherit;padding:4px}
 """
-GREEN, AMBER, RED = "#2e7d32", "#ef6c00", "#c62828"
 CONFIDENCE_COLOURS: dict[Confidence, str] = {"high": GREEN, "medium": AMBER, "low": RED}
 OVERLAP_GOOD = 70
 """Overlap percentage from which the header badge is green; amber from `OVERLAP_FAIR`."""
 OVERLAP_FAIR = 40
+
+
+class Log:
+    """`decisions/applied.yaml`: every change is written through at once, atomically."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.entries = load_applied(path)
+
+    def append(self, entry: Applied) -> None:
+        self.entries.append(entry)
+        self.flush()
+
+    def replace_last(self, entry: Applied) -> None:
+        self.entries[-1] = entry
+        self.flush()
+
+    def flush(self) -> None:
+        write_atomic(self.path, dump(plain(self.entries)))
 
 
 class Progress(NamedTuple):
@@ -147,10 +171,8 @@ def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict
         raise RuntimeError(f"{decisions} belongs to a different export than {run}")
     items: list[Item] = []
     rejected: dict[str, str] = {}
-    for path in sorted(decisions.glob("*.yaml")):
-        if path.name == APPLIED:
-            continue
-        decision = hydrate(Decision, yaml.safe_load(path.read_text(encoding="utf-8")))
+    for data in decision_files(decisions):
+        decision = hydrate(Decision, data)
         request_path = run / REQUESTS / f"{decision.request_id}.yaml"
         if decision.source_started_at != expected:
             rejected[decision.request_id] = (
@@ -168,6 +190,13 @@ def load_queue(run: str | Path, decisions: str | Path) -> tuple[list[Item], dict
     return items, rejected
 
 
+def decision_files(decisions: Path) -> Iterator[object]:
+    """The parsed content of each decision file, in file-name order; the log is not one."""
+    for path in sorted(decisions.glob("*.yaml")):
+        if path.name != APPLIED:
+            yield yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
 def load_applied(path: Path) -> list[Applied]:
     if not path.exists():
         return []
@@ -178,10 +207,7 @@ def load_applied(path: Path) -> list[Applied]:
 def course_names(decisions: Path) -> dict[str, str]:
     """Each decision's display course string, keyed by request id."""
     names: dict[str, str] = {}
-    for path in decisions.glob("*.yaml"):
-        if path.name == APPLIED:
-            continue
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for data in decision_files(decisions):
         if isinstance(data, dict) and "request_id" in data:
             names[str(data["request_id"])] = str(data.get("course", ""))
     return names
@@ -293,7 +319,7 @@ def label(text: str) -> str:
     return f'<div class="label">{escape(text)}</div>'
 
 
-def listing(title: str, values: Iterable[str]) -> list[str]:
+def bullet_list(title: str, values: Iterable[str]) -> list[str]:
     items = [f"<li>{escape(v)}</li>" for v in values]
     return [label(title), "<ul>", *items, "</ul>"] if items else []
 
@@ -392,10 +418,10 @@ def panel_html(
             parts.append(f"<p><b>Target:</b> {escape(decision.remap_target)}</p>")
         if decision.remap_analysis:
             parts.append(f"<p>{escape(decision.remap_analysis)}</p>")
-    parts += listing("Concerns", decision.concerns)
-    parts += listing("Overlap", decision.overlap)
-    parts += listing("Missing from PU", decision.missing_from_pu)
-    parts += listing("Extra in PU", decision.extra_in_pu)
+    parts += bullet_list("Concerns", decision.concerns)
+    parts += bullet_list("Overlap", decision.overlap)
+    parts += bullet_list("Missing from PU", decision.missing_from_pu)
+    parts += bullet_list("Extra in PU", decision.extra_in_pu)
     if request.related_request_ids:
         parts += [label("Siblings (many-to-one)"), "<ul>"]
         for sibling in request.related_request_ids:
@@ -514,22 +540,21 @@ def apply(
     queue, rejected = load_queue(run, decisions)
     for request_id, why in rejected.items():
         print(f"Not applicable {request_id}: {why}", flush=True)
-    log_path = decisions / APPLIED
-    log = load_applied(log_path)
+    log = Log(decisions / APPLIED)
     started = started_at(decisions.parent)
     vanished = {
         entry.request_id
-        for entry in since_export(log, started)
+        for entry in since_export(log.entries, started)
         if entry.action == "skip" and entry.reason == VANISHED
     }
     for request_id in sorted(vanished):
         print(f"Not applicable {request_id}: {VANISHED}", flush=True)
-    queue = select(queue, log, request_ids, verdicts, started)
+    queue = select(queue, log.entries, request_ids, verdicts, started)
     courses = course_names(decisions)
     requests = sum(1 for _ in (run / REQUESTS).glob("*.yaml"))
     session: list[Applied] = []
     for position, item in enumerate(queue, 1):
-        applied = {entry.request_id for entry in log if entry.action != "skip"}
+        applied = {entry.request_id for entry in log.entries if entry.action != "skip"}
         progress = Progress(position, len(queue), len(applied), requests)
         provisional: Applied | None = None
 
@@ -537,29 +562,26 @@ def apply(
             nonlocal provisional
             provisional = entry
             log.append(entry)
-            write_atomic(log_path, dump(plain(log)))
 
         try:
             entry = review(
                 site,
                 item,
                 progress=progress,
-                log=log,
+                log=log.entries,
                 courses=courses,
                 dry_run=dry_run,
                 record=record,
             )
         except Exception as error:
             if provisional is not None:
-                log[-1] = replace(provisional, reason=f"{UNVERIFIED}: {error}")
-                write_atomic(log_path, dump(plain(log)))
+                log.replace_last(replace(provisional, reason=f"{UNVERIFIED}: {error}"))
             raise
         if provisional is not None:
-            log[-1] = entry
+            log.replace_last(entry)
         else:
             log.append(entry)
         session.append(entry)
-        write_atomic(log_path, dump(plain(log)))
         detail = f" ({entry.reason})" if entry.reason else ""
         print(
             f"{position}/{len(queue)} {entry.request_id} {item.decision.course}: "
@@ -568,9 +590,7 @@ def apply(
         )
         if entry.reason and entry.action != "skip":
             raise RuntimeError(f"{entry.request_id}: {entry.reason}")
-    counts: dict[str, int] = {}
-    for entry in session:
-        counts[entry.action] = counts.get(entry.action, 0) + 1
+    counts = Counter(entry.action for entry in session)
     summary = ", ".join(f"{count} {action}" for action, count in sorted(counts.items()))
-    print(f"Applied {len(session)} of {len(queue)} queued: {summary or 'nothing'} → {log_path}")
+    print(f"Applied {len(session)} of {len(queue)} queued: {summary or 'nothing'} → {log.path}")
     return session

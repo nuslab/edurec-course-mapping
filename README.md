@@ -113,7 +113,7 @@ old export. Each decision file records the `source_started_at` of the export
 it was made from, so the approval script can tell which decisions predate the
 current export.
 
-- `inventory.yaml` (schema version 3): `collection` holds filters, status,
+- `inventory.yaml` (schema version 4): `collection` holds filters, status,
   counts and the search-partition audit; `mapping_groups` lists request IDs
   grouped by mapping identity; `list_pages` keeps the source result rows and
   search criteria.

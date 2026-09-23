@@ -45,8 +45,11 @@ from edurec_mappings.models import (
     Left,
     Request,
     Skipped,
+    as_dict,
+    hydrate,
 )
-from edurec_mappings.parse import DETAIL, document, dump, hydrate, save
+from edurec_mappings.parse import DETAIL
+from edurec_mappings.store import document, dump, save
 from tests.test_extract import records
 
 STARTED = "2026-09-22T10:00:00+00:00"
@@ -100,7 +103,7 @@ def make_run(directory, count=4):
     for request in requests:
         path = anon / "decisions" / f"{request.request_id}.yaml"
         path.parent.mkdir(exist_ok=True)
-        path.write_text(dump(decision(request).to_dict()))
+        path.write_text(dump(as_dict(decision(request))))
     return run, anon / "decisions", requests
 
 
@@ -146,7 +149,7 @@ class ApplyTests(unittest.TestCase):
         _, request = records()[0]
         loaded = hydrate(Request, yaml.safe_load(dump(request.to_dict())))
         self.assertEqual(loaded, request)
-        self.assertEqual(hydrate(Decision, decision(request).to_dict()), decision(request))
+        self.assertEqual(hydrate(Decision, as_dict(decision(request))), decision(request))
         with self.assertRaises(ValueError):
             hydrate(Decision, ["not", "a", "record"])
 
@@ -154,11 +157,11 @@ class ApplyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             stale = decisions / f"{requests[0].request_id}.yaml"
-            stale.write_text(dump(decision(requests[0], source_started_at="older").to_dict()))
+            stale.write_text(dump(as_dict(decision(requests[0], source_started_at="older"))))
             orphan = copy.deepcopy(requests[1])
             orphan.request_id = "0" * 24
             (decisions / "000000000000000000000000.yaml").write_text(
-                dump(decision(orphan).to_dict())
+                dump(as_dict(decision(orphan)))
             )
             queue, rejected = load_queue(run, decisions)
             self.assertEqual(
@@ -183,7 +186,7 @@ class ApplyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory)
             path = decisions / f"{requests[1].request_id}.yaml"
-            path.write_text(dump(decision(requests[1], verdict="reject").to_dict()))
+            path.write_text(dump(as_dict(decision(requests[1], verdict="reject"))))
             queue, _ = load_queue(run, decisions)
             ids = [item.request.request_id for item in queue]
             sibling_positions = [
@@ -300,7 +303,7 @@ class ApplyTests(unittest.TestCase):
                 dry_run=True,
                 reason="comment is empty",
             )
-            path.write_text(dump([entry.to_dict()]))
+            path.write_text(dump([as_dict(entry)]))
             self.assertEqual(load_applied(path), [entry])
 
     def test_freshness_comparison(self):
@@ -628,7 +631,7 @@ class ApplyTests(unittest.TestCase):
             run, decisions, requests = make_run(directory, count=1)
             remap = button_for("request remapping")
             advice = decision(requests[0], **FALLBACK)
-            (decisions / f"{requests[0].request_id}.yaml").write_text(dump(advice.to_dict()))
+            (decisions / f"{requests[0].request_id}.yaml").write_text(dump(as_dict(advice)))
             outcome = Clicked(remap, advice.prefills(None)["fallback"], "fallback")
             site = FakeSite({requests[0].request_id: outcome}, status_after=NOT_IN_QUEUE)
             (entry,) = apply(site, run, decisions)
@@ -642,7 +645,7 @@ class ApplyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run, decisions, requests = make_run(directory, count=1)
             path = decisions / f"{requests[0].request_id}.yaml"
-            path.write_text(dump(decision(requests[0], comment="Use [code]").to_dict()))
+            path.write_text(dump(as_dict(decision(requests[0], comment="Use [code]"))))
             site = FakeSite({})
             log = apply(site, run, decisions)
             self.assertEqual(site.prepared, [])

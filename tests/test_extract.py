@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import yaml
 from playwright.sync_api import sync_playwright
@@ -14,7 +15,8 @@ from edurec_mappings.cli import configured_terms, optional_rows, parse_args, ter
 from edurec_mappings.documents import MAX_TEXT_BYTES, scrape
 from edurec_mappings.extract import Checkpoint, extract
 from edurec_mappings.models import Fetched, Listing, ListRow, Partition
-from edurec_mappings.parse import detail, digest, save
+from edurec_mappings.parse import detail, digest
+from edurec_mappings.store import save
 from tests.test_parse import fixture
 
 
@@ -130,9 +132,7 @@ class ExtractTests(unittest.TestCase):
             self.assertEqual(len(data.requests), 3)
             self.assertEqual({p.term_low for p in site.searches}, {2610, 2620})
             self.assertEqual(data.collection.filters.terms, terms)
-            override = extract(
-                FakeSite(cap=100), Path(directory) / "override", term="2600", terms=terms
-            )
+            override = extract(FakeSite(cap=100), Path(directory) / "override", terms=["2600"])
             self.assertEqual(len(override.requests), 7)
 
     def test_invalid_term_configuration(self):
@@ -182,11 +182,14 @@ class ExtractTests(unittest.TestCase):
                 </form>""")
             site = EduRec(context)
             transitions = []
-            site.transition = lambda action, trigger=None, target=None: (
-                transitions.append((action, target)),
-                trigger(),
-            )
-            site.criterion("EMPLID", "A0000500X", None)
+
+            def fake_transition(action, trigger=None, target=None):
+                transitions.append((action, target))
+                if trigger:
+                    trigger()
+
+            with mock.patch.object(site, "transition", side_effect=fake_transition):
+                site.criterion("EMPLID", "A0000500X", None)
             self.assertEqual(transitions, [("N_EXSP_MOD_VW2_EMPLID$op", None)])
             self.assertEqual(site.control("EMPLID").input_value(), "A0000500X")
             browser.close()
@@ -242,7 +245,7 @@ class ExtractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "stale"
             with self.assertRaisesRegex(RuntimeError, "outside the requested partition"):
-                extract(StaleSite(cap=100), path, term="2610")
+                extract(StaleSite(cap=100), path, terms=["2610"])
             self.assertFalse(inventory(path)["collection"]["all_request_details_collected"])
 
     def test_all_terms_and_all_pages_beyond_cap_without_duplicates(self):
@@ -272,7 +275,7 @@ class ExtractTests(unittest.TestCase):
     def test_term_filter_and_yaml_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "term"
-            data = extract(FakeSite(), path, term="2610")
+            data = extract(FakeSite(), path, terms=["2610"])
             self.assertEqual(len(data.requests), 3)
             self.assertTrue(all(r.identity.term == "2610" for r in data.requests))
             self.assertEqual(inventory(path), data.inventory())
@@ -286,7 +289,7 @@ class ExtractTests(unittest.TestCase):
     def test_scrape_stage_writes_documents_once_and_caps_their_size(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scraped"
-            data = extract(FakeSite(), path, term="2610")
+            data = extract(FakeSite(), path, terms=["2610"])
             data.requests[0].comments = "see https://example.org/textbook.pdf"
             calls = []
 
@@ -378,7 +381,7 @@ class ExtractTests(unittest.TestCase):
             request.identity.student_id = "ONE_STUDENT"
         with tempfile.TemporaryDirectory() as directory:
             site = FakeSite(entries)
-            data = extract(site, Path(directory) / "one-student", term="2600")
+            data = extract(site, Path(directory) / "one-student", terms=["2600"])
             self.assertEqual(len(data.requests), 7)
             self.assertTrue(any(p.group_low != 0 or p.group_high != 999 for p in site.searches))
 
@@ -404,7 +407,7 @@ class ExtractTests(unittest.TestCase):
             path = Path(directory) / "rerun"
             extract(FakeSite(), path)
             self.assertEqual(len(saved_requests(path)), 10)
-            extract(FakeSite(), path, term="2610")
+            extract(FakeSite(), path, terms=["2610"])
             self.assertEqual(len(saved_requests(path)), 3)
 
     def test_indivisible_cap_fails_instead_of_claiming_complete(self):

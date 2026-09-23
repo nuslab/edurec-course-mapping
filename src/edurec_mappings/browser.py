@@ -17,6 +17,8 @@ from playwright.sync_api import BrowserContext, Frame, Locator, Response
 from .models import (
     NOT_IN_QUEUE,
     PENDING,
+    TERM_PATTERN,
+    VERDICT_COLOURS,
     Clicked,
     Decision,
     Left,
@@ -61,16 +63,8 @@ BUTTONS: dict[str, Verdict] = {
     "N_SR_EXT_STD_DW_MORE_PB": "request for more information",
 }
 """The detail page's action buttons; Cancel posts `#ICList` instead of its own id."""
-VERDICT_COLOURS: dict[Verdict, str] = {
-    "approve": "#2e7d32",
-    "reject": "#c62828",
-    "request remapping": "#ef6c00",
-    "request for more information": "#ef6c00",
-}
-"""Colour of the verdict pill and of the matching EduRec button's outline."""
 REVIEWER_ACTIONS = frozenset({*BUTTONS, "#ICList"})
 CAP = 300  # Observed server cap; exactly 300 rows is treated as capped.
-TERM_PATTERN = re.compile(r"\d{4}")
 ROW_ACTION = re.compile(r"#ICRow\d+")
 SETTLED = """({old, target}) => {
     const state = document.getElementById('ICStateNum');
@@ -88,13 +82,25 @@ SIGNALLED = """(old) => {
 SKIPPED = (
     "() => { const a = window.__edurecApply || {}; return a.skipped ? a.state.skipReason : null; }"
 )
-SET_COMMENT = """({id, value}) => {
+SET_BOX = """
+    const setBox = (box, value) => {
+        box.value = value;
+        for (const type of ['input', 'change']) box.dispatchEvent(new Event(type, {bubbles: true}));
+    };"""
+"""Fill a PeopleSoft field and fire the events its delegated handlers listen for."""
+SET_COMMENT = (
+    "({id, value}) => {"
+    + SET_BOX
+    + """
     const box = document.getElementById(id);
     if (!box) throw new Error('Comment box not found');
-    box.value = value;
-    for (const type of ['input', 'change']) box.dispatchEvent(new Event(type, {bubbles: true}));
+    setBox(box, value);
 }"""
-INSTALL = """({panel, buttons, cancel, verdicts, prefills, colours, dryRun, comments, fresh}) => {
+)
+INSTALL = (
+    "({panel, buttons, cancel, verdicts, prefills, colours, dryRun, comments, fresh}) => {"
+    + SET_BOX
+    + """
     const prior = window.__edurecApply;
     prior?.unhook();
     const hooks = [];
@@ -124,8 +130,7 @@ INSTALL = """({panel, buttons, cancel, verdicts, prefills, colours, dryRun, comm
     const mark = () => { for (const el of $$('.modified')) el.hidden = !modified(); };
     const fill = value => {
         if (!box) return;
-        box.value = value;
-        for (const type of ['input', 'change']) box.dispatchEvent(new Event(type, {bubbles: true}));
+        setBox(box, value);
         mark();
     };
     // Viewing a tab shows its pane; selecting one decides the comment, outline and pill.
@@ -203,6 +208,11 @@ INSTALL = """({panel, buttons, cancel, verdicts, prefills, colours, dryRun, comm
         });
     }
 }"""
+)
+
+
+class ApprovalNotLoadedError(RuntimeError):
+    """No frame shows the Course Mapping Approval form, e.g. only the dashboard is open."""
 
 
 def mapping_frame(context: BrowserContext) -> Frame:
@@ -213,7 +223,7 @@ def mapping_frame(context: BrowserContext) -> Frame:
         if frame.locator(APPROVAL_FORM).count()
     ]
     if not candidates:
-        raise RuntimeError(
+        raise ApprovalNotLoadedError(
             "Course Mapping Approval is not loaded. Open the approval component, "
             "not just the dashboard, and wait for its search form."
         )
@@ -280,9 +290,9 @@ def list_identity(page: Listing) -> str:
 class EduRec:
     """Drives the approval component read-only: search, paging, open and return actions."""
 
-    def __init__(self, context: BrowserContext, timeout: float = 60) -> None:
+    def __init__(self, context: BrowserContext, timeout_ms: float = 60_000) -> None:
         self.context = context
-        self.timeout = timeout * 1000
+        self.timeout_ms = timeout_ms
 
     def frame(self) -> Frame:
         return mapping_frame(self.context)
@@ -307,7 +317,7 @@ class EduRec:
 
         # State numbers may change before a response has updated the DOM.
         # Await the response for this exact action, then the settled page.
-        with frame.page.expect_response(posted({action}), timeout=self.timeout) as pending:
+        with frame.page.expect_response(posted({action}), timeout=self.timeout_ms) as pending:
             if trigger:
                 trigger()
             else:
@@ -319,7 +329,7 @@ class EduRec:
         if response.status >= 400:
             raise RuntimeError(f"EduRec action failed: HTTP {response.status}")
         self.frame().wait_for_function(
-            SETTLED, arg={"old": old_state, "target": target}, timeout=self.timeout
+            SETTLED, arg={"old": old_state, "target": target}, timeout=self.timeout_ms
         )
 
     def criterion(self, field: str, low: object = None, high: object = None) -> None:

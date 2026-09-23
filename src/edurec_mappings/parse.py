@@ -5,28 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
-from collections.abc import Callable, Iterable
-from dataclasses import fields, is_dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from types import UnionType
-from typing import Any, TypeVar, Union, cast, get_args, get_origin, get_type_hints
+from collections.abc import Callable
+from typing import TypeVar
 
-import yaml
 from bs4 import BeautifulSoup, Tag
 from bs4.element import PageElement
 
 from .models import (
     LIST_COLUMNS,
     Assessment,
-    Collection,
     ContactHours,
-    Document,
     Identity,
     Listing,
     ListRow,
-    MappingGroup,
     NusCourse,
     PartnerCourse,
     Request,
@@ -43,15 +34,6 @@ DETAIL = "N_EXSP_MOD_DT_TRNSFR_EQVLNCY_GRP$0"
 T = TypeVar("T")
 
 
-INVENTORY = "inventory.yaml"
-REQUESTS = "requests"
-DOCUMENTS = "documents"
-
-
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def clean(value: str) -> str | None:
     value = value.replace("\xa0", " ").strip()
     return value if value and value != "-" else None
@@ -59,27 +41,6 @@ def clean(value: str) -> str | None:
 
 def text(node: PageElement | None) -> str | None:
     return clean(node.get_text()) if node else None
-
-
-def hydrate(cls: type[T], data: object) -> T:
-    """Rebuild a record from its `plain` form: nested records, lists of them, `X | None`."""
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected a mapping for {cls.__name__}, got {type(data).__name__}")
-    hints = get_type_hints(cls)
-    names = [f.name for f in fields(cast(Any, cls)) if f.name in data]
-    return cls(**{name: value_of(hints[name], data[name]) for name in names})
-
-
-def value_of(hint: object, value: object) -> object:
-    origin = get_origin(hint)
-    if origin in (Union, UnionType):
-        members = [member for member in get_args(hint) if member is not type(None)]
-        return None if value is None else value_of(members[0], value)
-    if origin is list and isinstance(value, list):
-        return [value_of(get_args(hint)[0], item) for item in value]
-    if isinstance(hint, type) and is_dataclass(hint):
-        return hydrate(hint, value)
-    return value
 
 
 def digest(value: object) -> str:
@@ -189,62 +150,3 @@ def detail(soup: BeautifulSoup) -> Request:
         status=field("N_MOD_APPR_STATUS"),
         comments=field("N_MOD_COMMENTS"),
     )
-
-
-def document() -> Document:
-    return Document(collection=Collection(started_at=now()))
-
-
-def mapping_groups(requests: list[Request]) -> list[MappingGroup]:
-    """Group requests by mapping identity and tell each request about its collected siblings."""
-    groups: dict[str, MappingGroup] = {}
-    for request in requests:
-        group = groups.setdefault(
-            request.group_id,
-            MappingGroup(
-                group_id=request.group_id,
-                request_ids=[],
-                completeness="unverified" if request.many_to_one else "single_mapping",
-            ),
-        )
-        group.request_ids.append(request.request_id)
-    for request in requests:
-        siblings = groups[request.group_id].request_ids
-        request.related_request_ids = [r for r in siblings if r != request.request_id]
-    return list(groups.values())
-
-
-def write_atomic(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(content, encoding="utf-8")
-    temp.replace(path)
-
-
-def dump(value: object) -> str:
-    return yaml.safe_dump(value, allow_unicode=True, sort_keys=False)
-
-
-def reset(directory: str | Path) -> None:
-    """Remove a previous run's files from `directory`, leaving anything else in place."""
-    run = Path(directory)
-    (run / INVENTORY).unlink(missing_ok=True)
-    for name in (REQUESTS, DOCUMENTS):
-        shutil.rmtree(run / name, ignore_errors=True)
-
-
-def save(data: Document, directory: str | Path, requests: Iterable[Request] | None = None) -> None:
-    """Write the run directory: `inventory.yaml`, one YAML per request, scraped text once per URL.
-
-    `requests` limits the request files written to those that changed; the default
-    writes them all.
-    """
-    run = Path(directory)
-    data.mapping_groups = mapping_groups(data.requests)
-    data.collection.updated_at = now()
-    for request in data.requests if requests is None else requests:
-        for linked in request.linked_documents or []:
-            if linked.text is not None and linked.path and not (run / linked.path).exists():
-                write_atomic(run / linked.path, linked.text)
-        write_atomic(run / REQUESTS / f"{request.request_id}.yaml", dump(request.to_dict()))
-    write_atomic(run / INVENTORY, dump(data.inventory()))

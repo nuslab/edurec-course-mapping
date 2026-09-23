@@ -10,13 +10,13 @@ links the export could not read.
 from __future__ import annotations
 
 import argparse
-import re
 import select
 import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import get_args
 
 import yaml
 from playwright.sync_api import BrowserContext, Dialog, sync_playwright
@@ -24,13 +24,19 @@ from playwright.sync_api import Error as PlaywrightError
 
 from .anonymize import anonymize, anonymized_path
 from .apply import apply
-from .browser import APPROVAL_FORM, COMPONENT, Applier, EduRec, mapping_frame
+from .browser import (
+    APPROVAL_FORM,
+    COMPONENT,
+    Applier,
+    ApprovalNotLoadedError,
+    EduRec,
+    mapping_frame,
+)
 from .documents import html_text, playwright_fetcher, playwright_renderer, scrape
 from .extract import Checkpoint, extract
-from .models import Verdict
-from .parse import reset, save
+from .models import TERM_PATTERN, Verdict
+from .store import reset, save
 
-TERM_PATTERN = re.compile(r"\d{4}")
 LOGIN_PROMPT = (
     "Log in and accept the policy if you agree. Collection starts automatically once "
     "the Course Mapping Approval form is visible; press Enter to retry immediately: "
@@ -41,12 +47,7 @@ APPLY_NOTICE = (
     "Only clicks made while this program shows its panel are logged; "
     "do not act in EduRec after it stops."
 )
-VERDICTS: tuple[Verdict, ...] = (
-    "approve",
-    "reject",
-    "request remapping",
-    "request for more information",
-)
+VERDICTS: tuple[Verdict, ...] = get_args(Verdict)
 
 
 def optional_rows(value: str) -> int | None:
@@ -107,14 +108,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Directory of the anonymized copy; default adds '-anonymized' to --output",
     )
     add_browser_arguments(parser)
-    args = parser.parse_args(argv)
+    args = parse_with_timeout(parser, argv)
     try:
+        # An explicit term overrides the configured list.
         args.terms = [args.term] if args.term else configured_terms(args.terms_file)
     except (OSError, ValueError, argparse.ArgumentTypeError, yaml.YAMLError) as error:
         parser.error(str(error))
     args.anonymized_output = args.anonymized_output or str(anonymized_path(args.output))
     if Path(args.anonymized_output).resolve() == Path(args.output).resolve():
         parser.error("The anonymized copy must use a different path from --output")
+    return args
+
+
+def parse_with_timeout(
+    parser: argparse.ArgumentParser, argv: list[str] | None
+) -> argparse.Namespace:
+    """Parse `argv` and add `timeout_ms`, the `--timeout` seconds that Playwright expects."""
+    args = parser.parse_args(argv)
     args.timeout_ms = args.timeout * 1000
     return args
 
@@ -138,9 +148,7 @@ def parse_render_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--proxy", default="")
     add("--timeout", type=int, default=90)
     add("--settle", type=float, default=8, help="Seconds to wait after network idle")
-    args = parser.parse_args(argv)
-    args.timeout_ms = args.timeout * 1000
-    return args
+    return parse_with_timeout(parser, argv)
 
 
 def run_render(args: argparse.Namespace) -> None:
@@ -170,9 +178,8 @@ def parse_apply_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--verdict", dest="verdicts", action="append", default=[], choices=VERDICTS)
     add("--dry-run", action="store_true", help="Disable the action buttons; only Skip advances")
     add_browser_arguments(parser)
-    args = parser.parse_args(argv)
+    args = parse_with_timeout(parser, argv)
     args.decisions = args.decisions or str(anonymized_path(args.run) / "decisions")
-    args.timeout_ms = args.timeout * 1000
     return args
 
 
@@ -215,16 +222,15 @@ def forget_downloads(profile: Path) -> None:
             connection.execute(f"DELETE FROM {table}")
 
 
-def fit_to_screen(context: BrowserContext, y_offset: int = 0) -> None:
+def fit_to_screen(context: BrowserContext) -> None:
     """Size the window to the display; the VNC window manager ignores --start-maximized."""
     page = context.pages[0] if context.pages else context.new_page()
     screen = page.evaluate("() => ({width: screen.availWidth, height: screen.availHeight})")
-    screen["height"] -= y_offset
     cdp = context.new_cdp_session(page)
     window = cdp.send("Browser.getWindowForTarget")
     cdp.send(
         "Browser.setWindowBounds",
-        {"windowId": window["windowId"], "bounds": {"left": 0, "top": y_offset, **screen}},
+        {"windowId": window["windowId"], "bounds": {"left": 0, "top": 0, **screen}},
     )
     cdp.detach()
 
@@ -235,6 +241,15 @@ def open_component(context: BrowserContext, timeout_ms: float) -> None:
     page.frame_locator('iframe[name="TargetContent"]').locator(APPROVAL_FORM).wait_for(
         state="attached", timeout=timeout_ms
     )
+
+
+def ensure_approval(context: BrowserContext, timeout_ms: float) -> None:
+    """Require the approval form, opening the component when only the dashboard is up."""
+    try:
+        mapping_frame(context)
+    except ApprovalNotLoadedError:
+        open_component(context, timeout_ms)
+        mapping_frame(context)
 
 
 def approval_ready(context: BrowserContext) -> bool:
@@ -264,13 +279,7 @@ def await_approval(context: BrowserContext, args: argparse.Namespace) -> None:
     pressing Enter retries at once, opening the component when only the dashboard is up.
     """
     if args.ready:
-        try:
-            mapping_frame(context)
-        except RuntimeError as error:
-            if "not loaded" not in str(error):
-                raise
-            open_component(context, args.timeout_ms)
-            mapping_frame(context)
+        ensure_approval(context, args.timeout_ms)
         return
     print(LOGIN_PROMPT, end="", flush=True)
     while True:
@@ -280,13 +289,7 @@ def await_approval(context: BrowserContext, args: argparse.Namespace) -> None:
         if not wait_for_enter(POLL_SECONDS):
             continue
         try:
-            try:
-                mapping_frame(context)
-            except RuntimeError as error:
-                if "not loaded" not in str(error):
-                    raise
-                open_component(context, args.timeout_ms)
-                mapping_frame(context)
+            ensure_approval(context, args.timeout_ms)
             return
         except (RuntimeError, PlaywrightError) as error:
             print(f"Not ready: {str(error).splitlines()[0]}")
@@ -326,12 +329,11 @@ def run(context: BrowserContext, args: argparse.Namespace) -> None:
     try:
         connect(context, args)
         context.remove_listener("dialog", manual_dialog)
-        site = EduRec(context, args.timeout)
+        site = EduRec(context, args.timeout_ms)
         result = extract(
             site,
             args.output,
             reassign_id=args.reassign_id.strip(),
-            term=args.term,
             rows=args.rows,
             terms=args.terms,
         )
@@ -364,7 +366,7 @@ def run_apply(context: BrowserContext, args: argparse.Namespace) -> None:
     try:
         connect(context, args)
         apply(
-            Applier(context, args.timeout),
+            Applier(context, args.timeout_ms),
             args.run,
             args.decisions,
             request_ids=args.request_ids,
