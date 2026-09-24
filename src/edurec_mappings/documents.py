@@ -20,7 +20,7 @@ from xml.etree import ElementTree
 
 import pypdfium2
 from bs4 import BeautifulSoup
-from playwright.sync_api import BrowserContext
+from playwright.sync_api import APIRequestContext, BrowserContext
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from .models import LinkedDocument, Request
@@ -332,11 +332,9 @@ def scrape(requests: list[Request], fetch: Fetcher, render: Renderer | None = No
         print(f"Scraped URLs for {index}/{len(requests)} requests", flush=True)
 
 
-def playwright_fetcher(context: BrowserContext, timeout: float) -> Fetcher:
-    """Fetch through the browser context so cookies and proxy settings apply."""
-
+def playwright_fetcher(requests: APIRequestContext, timeout: float) -> Fetcher:
     def fetch(url: str) -> Fetched:
-        response = context.request.get(url, timeout=timeout, max_redirects=10)
+        response = requests.get(url, timeout=timeout, max_redirects=10)
         try:
             return Fetched(response.status, response.headers.get("content-type"), response.body())
         finally:

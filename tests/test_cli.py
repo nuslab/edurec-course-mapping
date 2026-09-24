@@ -154,13 +154,14 @@ class RunTests(unittest.TestCase):
         self.save = self.mocks["Store"].return_value.save
         self.save.return_value = ["new"]
         self.context = mock.MagicMock()
+        self.requests = mock.MagicMock()
 
     def assert_dialog_hook_removed(self) -> None:
         self.context.on.assert_called_once_with("dialog", cli.manual_dialog)
         self.context.remove_listener.assert_called_with("dialog", cli.manual_dialog)
 
     def test_run_export_extracts_with_the_parsed_filters_and_stores(self) -> None:
-        out = quietly(cli.run_export, self.context, namespace())
+        out = quietly(cli.run_export, self.context, namespace(), self.requests)
         self.mocks["EduRec"].assert_called_once_with(self.context, 60000)
         self.mocks["export"].assert_called_once_with(
             self.mocks["EduRec"].return_value,
@@ -182,10 +183,21 @@ class RunTests(unittest.TestCase):
                 request.documents = [LinkedDocument("https://example.org")]
 
         self.mocks["scrape"].side_effect = scrape
-        quietly(cli.run_export, self.context, namespace(documents=True))
+        quietly(cli.run_export, self.context, namespace(documents=True), self.requests)
         (stored,) = self.save.call_args.args
         self.assertEqual(len(stored), 2)
         self.assertTrue(all(r.documents for r in stored))
+
+    def test_documents_are_fetched_without_the_browser_cookies(self) -> None:
+        self.context.pages[0].evaluate.return_value = "Chrome/1"
+        args = namespace(documents=True, proxy="socks5://proxy:1080")
+        quietly(cli.run_export, self.context, args, self.requests)
+        self.requests.new_context.assert_called_once_with(
+            user_agent="Chrome/1", proxy={"server": "socks5://proxy:1080"}
+        )
+        client = self.requests.new_context.return_value
+        self.mocks["playwright_fetcher"].assert_called_once_with(client, 60000)
+        client.dispose.assert_called_once()
 
     def test_an_interrupted_export_stores_what_was_complete(self) -> None:
         def export(site: object, data: ExportResult, **_: object) -> None:
@@ -194,7 +206,7 @@ class RunTests(unittest.TestCase):
 
         self.mocks["export"].side_effect = export
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
-            cli.run_export(self.context, namespace())
+            cli.run_export(self.context, namespace(), self.requests)
         self.assertEqual(len(self.save.call_args.args[0]), 1)
         self.mocks["hold_open"].assert_called_once_with(
             mock.ANY, "Collection stopped: lost session."
@@ -202,7 +214,7 @@ class RunTests(unittest.TestCase):
         self.assert_dialog_hook_removed()
         # With --documents a request is only complete once its documents are known.
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
-            cli.run_export(self.context, namespace(documents=True))
+            cli.run_export(self.context, namespace(documents=True), self.requests)
         self.assertEqual(self.save.call_args.args[0], [])
 
     def test_run_review_passes_the_filters_and_reports_errors(self) -> None:

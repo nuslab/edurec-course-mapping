@@ -78,8 +78,9 @@ by student ID, then mapping group and sequence. A search still capped after
 every split ends the export as `interrupted`.
 
 **Documents.** URLs in the partner course title, supporting URL, synopsis,
-other information, prerequisites and comments are fetched through the browser
-session. Dropbox, Google Drive file and Google Docs share links are rewritten to
+other information, prerequisites and comments are fetched with the browser's
+user agent and proxy but without its cookies, so a link to a page that needs the
+EduRec account's sign-in fails instead of being stored. Dropbox, Google Drive file and Google Docs share links are rewritten to
 their download or export URLs. PDF, Word (`.docx`), HTML and plain text are
 read; a zip archive (such as a Dropbox folder link) and the top level of a
 shared Google Drive folder (up to 20 files, no subfolders) are read file by

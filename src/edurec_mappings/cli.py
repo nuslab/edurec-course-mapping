@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import get_args
 
 import yaml
-from playwright.sync_api import BrowserContext, Dialog, sync_playwright
+from playwright.sync_api import (
+    APIRequest,
+    APIRequestContext,
+    BrowserContext,
+    Dialog,
+    Playwright,
+    sync_playwright,
+)
 from playwright.sync_api import Error as PlaywrightError
 
 from .documents import (
@@ -181,28 +188,47 @@ def run_render(args: argparse.Namespace) -> None:
 
 
 @contextmanager
-def browser_context(args: argparse.Namespace) -> Iterator[BrowserContext]:
+def browser_context(playwright: Playwright, args: argparse.Namespace) -> Iterator[BrowserContext]:
     """Attach to a debugging endpoint (left open) or launch a persistent profile (closed)."""
-    with sync_playwright() as playwright:
-        if args.cdp_url:
-            browser = playwright.chromium.connect_over_cdp(args.cdp_url, timeout=args.timeout_ms)
-            if len(browser.contexts) != 1:
-                raise RuntimeError("Expected one browser context")
-            yield browser.contexts[0]
-            return
-        profile = Path(args.profile)
-        forget_downloads(profile)
-        context = playwright.chromium.launch_persistent_context(
-            profile,
-            headless=False,
-            proxy={"server": args.proxy} if args.proxy else None,
-            no_viewport=True,  # Let the page follow the window instead of a fixed 1280x720.
-        )
-        try:
-            fit_to_screen(context)
-            yield context
-        finally:
-            context.close()
+    if args.cdp_url:
+        browser = playwright.chromium.connect_over_cdp(args.cdp_url, timeout=args.timeout_ms)
+        if len(browser.contexts) != 1:
+            raise RuntimeError("Expected one browser context")
+        yield browser.contexts[0]
+        return
+    profile = Path(args.profile)
+    forget_downloads(profile)
+    context = playwright.chromium.launch_persistent_context(
+        profile,
+        headless=False,
+        proxy={"server": args.proxy} if args.proxy else None,
+        no_viewport=True,  # Let the page follow the window instead of a fixed 1280x720.
+    )
+    try:
+        fit_to_screen(context)
+        yield context
+    finally:
+        context.close()
+
+
+@contextmanager
+def signed_out_requests(
+    factory: APIRequest, context: BrowserContext, args: argparse.Namespace
+) -> Iterator[APIRequestContext]:
+    """An HTTP client with the browser's user agent and proxy but none of its cookies.
+
+    Linked URLs are entered by students; fetched with the EduRec session, a link to a
+    page that only the signed-in account can open would have its text stored.
+    """
+    page = context.pages[0] if context.pages else context.new_page()
+    requests = factory.new_context(
+        user_agent=page.evaluate("() => navigator.userAgent"),
+        proxy={"server": args.proxy} if args.proxy else None,
+    )
+    try:
+        yield requests
+    finally:
+        requests.dispose()
 
 
 def forget_downloads(profile: Path) -> None:
@@ -292,7 +318,9 @@ def hold_open(args: argparse.Namespace, message: str) -> None:
         input("Browser remains open for inspection. Press Enter to close: ")
 
 
-def collect(context: BrowserContext, args: argparse.Namespace, result: ExportResult) -> None:
+def collect(
+    context: BrowserContext, args: argparse.Namespace, result: ExportResult, requests: APIRequest
+) -> None:
     # Dialogs stay open while logging in; afterwards Playwright dismisses them.
     context.on("dialog", manual_dialog)
     try:
@@ -309,8 +337,9 @@ def collect(context: BrowserContext, args: argparse.Namespace, result: ExportRes
     )
     print(f"{result.status}: {len(result.requests)} requests collected", flush=True)
     if args.documents:
-        fetch = playwright_fetcher(context, args.timeout_ms)
-        scrape(result.requests, fetch, process_renderer(args.proxy or None, args.timeout_ms))
+        with signed_out_requests(requests, context, args) as client:
+            fetch = playwright_fetcher(client, args.timeout_ms)
+            scrape(result.requests, fetch, process_renderer(args.proxy or None, args.timeout_ms))
 
 
 def persist(result: ExportResult, args: argparse.Namespace) -> None:
@@ -320,12 +349,12 @@ def persist(result: ExportResult, args: argparse.Namespace) -> None:
     print(f"{len(ready)} requests stored, {len(added)} new versions in {args.store}", flush=True)
 
 
-def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
+def run_export(context: BrowserContext, args: argparse.Namespace, requests: APIRequest) -> None:
     """Collect, then store what was collected even when collection stopped early."""
     result = ExportResult()
     try:
         try:
-            collect(context, args, result)
+            collect(context, args, result, requests)
         finally:
             persist(result, args)
     except Exception as error:
@@ -362,5 +391,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "pending":
         run_pending(args)
         return
-    with browser_context(args) as context:
-        (run_export if args.command == "export" else run_review)(context, args)
+    with sync_playwright() as playwright, browser_context(playwright, args) as context:
+        if args.command == "export":
+            run_export(context, args, playwright.request)
+        else:
+            run_review(context, args)
