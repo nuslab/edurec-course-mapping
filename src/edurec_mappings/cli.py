@@ -1,9 +1,9 @@
-"""Extract EduRec course mapping approval requests and walk the reviewer through proposals.
+"""Extract EduRec course mapping approval requests and review proposals for them.
 
 `export` extracts requests from EduRec (read-only navigation), with --documents
 fetches the URLs in their course details, and adds anonymized request versions to
 the store. `pending` lists the request versions still awaiting a proposal. `review`
-walks the reviewer through the proposals in EduRec. `render URL` prints the text of
+shows each proposal on its EduRec page. `render URL` prints the text of
 one page after its scripts have run, for links the export could not read.
 """
 
@@ -125,8 +125,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     review_parser = commands.add_parser(
         "review",
         parents=[browser],
-        help="Walk the reviewer through the advisor's proposals",
-        description="Walk the reviewer through the advisor's proposals on their EduRec pages",
+        help="Show each proposal on its EduRec page",
+        description="Show each proposal on its EduRec detail page with a panel for submitting it",
     )
     add = review_parser.add_argument
     add("--request-id", dest="request_ids", action="append", default=[], help="Only these")
@@ -163,7 +163,6 @@ def run_pending(args: argparse.Namespace) -> None:
 
 
 def run_render(args: argparse.Namespace) -> None:
-    """Render one URL in a fresh headless browser and write its text, or HTML, to stdout."""
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(proxy={"server": args.proxy} if args.proxy else None)
         try:
@@ -270,12 +269,11 @@ def await_approval(context: BrowserContext, args: argparse.Namespace) -> None:
 
 
 def manual_dialog(_: Dialog) -> None:
-    """Leave browser dialogs to the person at the VNC desktop instead of auto-dismissing."""
-    print("Browser dialog waiting for your choice in VNC.", flush=True)
+    """Leave browser dialogs open in VNC instead of auto-dismissing them."""
+    print("Browser dialog waiting in VNC.", flush=True)
 
 
 def connect(context: BrowserContext, args: argparse.Namespace) -> None:
-    """Open the component unless attached, then wait for the signed-in approval form."""
     if not args.cdp_url:
         page = context.pages[0] if context.pages else context.new_page()
         try:
@@ -295,8 +293,7 @@ def hold_open(args: argparse.Namespace, message: str) -> None:
 
 
 def collect(context: BrowserContext, args: argparse.Namespace, result: ExportResult) -> None:
-    """Extract the matching requests into `result` and, with --documents, their documents."""
-    # Dialogs are left to the user while logging in; afterwards Playwright dismisses them.
+    # Dialogs stay open while logging in; afterwards Playwright dismisses them.
     context.on("dialog", manual_dialog)
     try:
         connect(context, args)
@@ -320,7 +317,7 @@ def persist(result: ExportResult, args: argparse.Namespace) -> None:
     """Store every collected request that is complete: with --documents, once fetched."""
     ready = [r for r in result.requests if not args.documents or r.documents is not None]
     added = Store(args.store).save(ready)
-    print(f"{len(ready)} requests stored, {len(added)} new versions → {args.store}", flush=True)
+    print(f"{len(ready)} requests stored, {len(added)} new versions in {args.store}", flush=True)
 
 
 def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
@@ -337,12 +334,9 @@ def run_export(context: BrowserContext, args: argparse.Namespace) -> None:
 
 
 def run_review(context: BrowserContext, args: argparse.Namespace) -> None:
-    """Walk the proposals; on error the browser is closed at once, never held open.
-
-    An unwatched detail page would let the reviewer act without anything being logged.
-    """
+    """Unlike export, close the browser on error: clicks on it would not be logged."""
     print(REVIEW_NOTICE, flush=True)
-    # The panel's confirm() and PeopleSoft's unsaved-changes dialog are the reviewer's to answer.
+    # The panel's confirm() and PeopleSoft's unsaved-changes dialog stay open.
     context.on("dialog", manual_dialog)
     try:
         connect(context, args)

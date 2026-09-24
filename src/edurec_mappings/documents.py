@@ -55,8 +55,6 @@ DOC_EXPORT = {"document": "txt", "presentation": "pdf", "spreadsheets": "csv"}
 
 
 class Fetched(NamedTuple):
-    """An HTTP response for the document fetcher."""
-
     status: int
     content_type: str | None
     body: bytes
@@ -209,7 +207,6 @@ def rendered_text(target: str, render: Renderer, extracted: LinkedDocument) -> L
 
     Single-page catalogues (Korea University, NYCU, TUMonline) serve a loading shell and
     fill it in with scripts; the rendered page replaces the shell only when it says more.
-    A render failure keeps the shell, so the record never gets worse than the plain fetch.
     """
     shell = extracted.text or ""
     # A `#/` route is chosen by scripts; the plain fetch drops the fragment and gets the index.
@@ -226,7 +223,6 @@ def rendered_text(target: str, render: Renderer, extracted: LinkedDocument) -> L
 
 
 def error_summary(error: BaseException) -> str:
-    """The first line of the error's message, or its type when the message is empty."""
     return str(error).splitlines()[0] if str(error) else type(error).__name__
 
 
@@ -319,7 +315,6 @@ def attach_documents(
     cache: dict[str, LinkedDocument] | None = None,
     render: Renderer | None = None,
 ) -> None:
-    """Set the request's `documents` in place."""
     cache = cache if cache is not None else {}
     documents: list[LinkedDocument] = []
     for url in find_urls(request):

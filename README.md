@@ -1,8 +1,8 @@
 # edurec-mappings
 
 Read-only extraction of NUS EduRec **Course Mapping Approval** requests into an
-append-only store of anonymized YAML files, plus a guided `review` session in
-which a human submits the course-mapping advisor's proposals in EduRec.
+append-only store of anonymized YAML files, plus a guided `review` session for
+submitting proposals in EduRec.
 
 ## Layout
 
@@ -86,16 +86,16 @@ shared Google Drive folder (up to 20 files, no subfolders) are read file by
 file into one text with a `=== name ===` heading per file. An HTML page with
 under 1,000 characters of text, or a `#/` route, is re-read with `render --html`
 to catch script-rendered catalogues; that browser runs in its own process, is not
-signed in, and is killed 30 s after its page timeout and settle time. A short page titled as a sign-in or bot check
-is recorded as `failed`. HTTP 429 and 502–504 are retried once after 10 s. Text
-over 200 KB is recorded as `too_large` and not stored. Failures are recorded per
-URL and never abort the export.
+signed in, and is killed 30 s after its page timeout and settle time. A short page
+titled as a sign-in or bot check is recorded as `failed`. HTTP 429 and 502–504
+are retried once after 10 s. Text over 200 KB is recorded as `too_large` and not
+stored. Failures are recorded per URL and never abort the export.
 
 ### pending
 
 Prints the store-relative `requests/<request_id>/<hash>.yaml` of the latest
 version of every request without a proposal, listing sibling parts of a
-many-to-one mapping together. It is the course-mapping advisor's work queue.
+many-to-one mapping together.
 
 ### review
 
@@ -109,7 +109,7 @@ For each request it searches EduRec by the real student ID, pre-fills the
 comment box with the proposal's comment above any existing text, and injects a
 panel with the proposal's recommended and fallback verdicts, evidence and
 siblings. **Select** loads a verdict's comment into the box and marks its
-EduRec button; the reviewer still presses that button, or **Skip**. A request
+EduRec button; the program never presses it. **Skip** moves on. A request
 whose live detail differs from the export, or whose proposal comment is empty
 or still has a placeholder (`[`, `XXXX`), is skipped.
 
@@ -138,10 +138,10 @@ Exports only add or rewrite files; nothing is deleted.
 ```
 course-mappings/
 ├── requests/<request_id>/<hash>.yaml    # anonymized request versions (export)
-├── proposals/<request_id>/<hash>.yaml   # the advisor's proposals (not written by this package)
+├── proposals/<request_id>/<hash>.yaml   # proposals (not written by this package)
 ├── outcomes/<request_id>/<hash>.yaml    # submitted verdicts (review)
 ├── documents/<url_hash>.txt             # latest scraped text per URL
-└── private/                             # never give the advisor access
+└── private/                             # keep private
     ├── student_ids.yaml                 # request_id -> real student ID; read only by review
     └── hmac_key                         # back it up
 ```
@@ -155,16 +155,15 @@ course-mappings/
   file with a new `created_at`.
 - **Proposals and outcomes** are keyed by path, so they bind to one request
   version: changed content becomes a new version, pending again.
-- **Identifiers**: `request_id` and the `student-…` pseudonym are HMAC digests
+- **Identifiers**: `request_id` and the `student-<hex>` pseudonym are HMAC digests
   keyed by `private/hmac_key`, stable across exports and irreversible without it.
   A new key would detach every proposal.
 
-## Guarantees and limits
+## Scope
 
-- Export uses only search, row-open, return-to-list, next-page and view-size
-  actions. Review additionally fills the comment box and observes clicks; it
-  never presses an EduRec action button.
-- Scope is whatever the signed-in user sees in Course Mapping Approval, with no
+- Export only searches, opens rows, returns to the list, pages and switches the
+  view size. Review also fills the comment box and watches for clicks.
+- Scope is whatever the signed-in account sees in Course Mapping Approval, with no
   Mapping Status filter. The NUS syllabus is not on the detail page and is not
   exported.
 - Session tokens and raw HTML are not stored.
@@ -177,5 +176,4 @@ ruff format . && ruff check --fix . && mypy && pytest
 ```
 
 Tests use `tests/fixtures/` and local headless Chromium with intercepted
-requests; they never contact EduRec. `models.Proposal` mirrors the proposal
-format specified in `.claude/agents/course-mapping.md`.
+requests; they never contact EduRec.

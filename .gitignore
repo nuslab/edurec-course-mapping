@@ -9,8 +9,3 @@ dist/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
-
-# Runtime data lives in ../edurec-data; never keep exports or login state here
-output/
-browser-profile/
-browser-profile-backup-*/

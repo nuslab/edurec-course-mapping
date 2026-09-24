@@ -22,9 +22,7 @@ Confidence = Literal["high", "medium", "low"]
 Tab = Literal["recommended", "fallback"]
 
 SCHEMA_VERSION = 8
-"""Version of the stored request files."""
 TERM_PATTERN = re.compile(r"\d{4}")
-"""A four-digit EduRec term code, e.g. 2620."""
 PENDING_APPROVAL = "Pending Approval"
 
 
@@ -33,7 +31,6 @@ ADAPTERS: dict[type, TypeAdapter[Any]] = {}
 
 
 def adapter(kind: type[T]) -> TypeAdapter[T]:
-    """The record type's validator and serialiser, built once per type."""
     if kind not in ADAPTERS:
         ADAPTERS[kind] = TypeAdapter(kind)
     return ADAPTERS[kind]
@@ -61,9 +58,6 @@ def hydrate(cls: type[T], data: object) -> T:
     except TypeError as error:
         raise ValueError(f"{cls.__name__} is not JSON-compatible: {error}") from error
     return adapter(cls).validate_json(payload, strict=True, extra="forbid")
-
-
-# --- Search and results grid -------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -126,7 +120,7 @@ class ListRow:
     nus_number: str | None = None
     reassigned_to: str | None = None
     row_action: str
-    """The row's PeopleSoft `#ICRow…` action; it changes on every render."""
+    """The row's PeopleSoft `#ICRow<n>` action; it changes on every render."""
 
     def cells(self) -> dict[str, str | None]:
         """The displayed values, without the render-specific action."""
@@ -147,8 +141,6 @@ class GridCounter(NamedTuple):
 
 @dataclass
 class Listing:
-    """One page of results as displayed, with the grid counter when present."""
-
     rows: list[ListRow]
     counter: GridCounter | None
     has_next: bool
@@ -158,9 +150,6 @@ class Listing:
         if not self.counter:
             raise RuntimeError("Result counter is missing")
         return self.counter
-
-
-# --- Mapping request ---------------------------------------------------------------------
 
 
 @dataclass
@@ -190,8 +179,6 @@ class Identity:
 
 @dataclass
 class Student:
-    """The student's programme."""
-
     academic_program: str | None
     academic_plan: str | None
     requirement_term: str | None
@@ -297,9 +284,6 @@ class ExportResult:
     requests: list[Request] = field(default_factory=list)
 
 
-# --- Proposal and outcome ----------------------------------------------------------------
-
-
 @dataclass
 class Remap:
     target: str
@@ -309,7 +293,7 @@ class Remap:
 
 @dataclass
 class Fallback:
-    """On close calls, the verdict a reviewer who disagrees with `Proposal.verdict` would reach."""
+    """On close calls, the verdict to submit instead of `Proposal.verdict`."""
 
     verdict: Verdict
     comment: str
@@ -317,11 +301,10 @@ class Fallback:
 
 @dataclass
 class Proposal:
-    """`proposals/<request_id>/<hash>.yaml`: the advisor's verdict on one request version.
+    """`proposals/<request_id>/<hash>.yaml`: the proposed verdict on one request version.
 
     The path is the key: it names the request version the proposal was made from, so
-    a changed request is a new version without a proposal. See
-    .claude/agents/course-mapping.md.
+    a changed request is a new version without a proposal.
     """
 
     verdict: Verdict
@@ -341,7 +324,7 @@ class Proposal:
 
 @dataclass
 class Outcome:
-    """`outcomes/<request_id>/<hash>.yaml`: what the reviewer submitted.
+    """`outcomes/<request_id>/<hash>.yaml`: what was submitted.
 
     `verdict` is None when the request left the approval queue before it was opened.
     `verified` is True once the live status showed the request out of the queue; `note`
@@ -355,11 +338,8 @@ class Outcome:
     note: str | None = None
 
 
-# --- Reviewer reactions --------------------------------------------------------------------
-
-
 class Clicked(NamedTuple):
-    """The EduRec button the reviewer's click posted and the comment box at that moment."""
+    """The EduRec button a click posted and the comment box at that moment."""
 
     verdict: Verdict | None
     """None when Cancel returned to the list."""

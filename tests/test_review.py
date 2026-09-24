@@ -150,7 +150,7 @@ def outcome(entry: Outcome | Skipped) -> Outcome:
 
 
 class FakeSite:
-    """Scripted reviewer: `reactions` maps request_id to what the human does."""
+    """Scripted site: `reactions` maps request_id to the click or skip."""
 
     def __init__(
         self,
@@ -450,7 +450,7 @@ class LoopTests(unittest.TestCase):
                 [action_of(log[i]) for i in ids], ["approve", "reject", "skip", "skip"]
             )
             self.assertEqual(outcome(log[ids[1]]).comment, edited)
-            self.assertEqual(skip_reason(log[ids[2]]), "skipped by the reviewer: busy")
+            self.assertEqual(skip_reason(log[ids[2]]), "skipped on the panel: busy")
             self.assertTrue(outcome(log[ids[0]]).verified, "A status other than pending verifies")
             self.assertIn("Approved", skip_reason(log[ids[3]]))
             self.assertEqual(stored_outcomes(store), {i: log[i] for i in ids[:2]})
@@ -490,7 +490,7 @@ class LoopTests(unittest.TestCase):
             store, versions = make_store(directory, count=3)
             ids = ids_of(versions)
             site = FakeSite(
-                {ids[0]: Skipped("reviewer left the page"), ids[2]: Skipped(SKIPPED)},
+                {ids[0]: Skipped("left the detail page"), ids[2]: Skipped(SKIPPED)},
                 live={ids[1]: NotInQueueError("gone")},
             )
             log = review(site, store.root)
@@ -498,7 +498,7 @@ class LoopTests(unittest.TestCase):
                 sorted(site.opened), sorted(ids), "The loop continues past a vanished request"
             )
             self.assertEqual([action_of(log[i]) for i in ids], ["skip", NOT_IN_QUEUE, "skip"])
-            self.assertEqual(skip_reason(log[ids[0]]), "reviewer left the page")
+            self.assertEqual(skip_reason(log[ids[0]]), "left the detail page")
             self.assertEqual(sorted(r for r, _, _ in site.prepared), sorted([ids[0], ids[2]]))
             vanished = outcome(log[ids[1]])
             self.assertEqual((vanished.verdict, vanished.verified), (None, True))

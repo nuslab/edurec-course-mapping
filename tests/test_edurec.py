@@ -316,15 +316,14 @@ class ReviewPageTests(unittest.TestCase):
             markers = {"recommended": [["Selected", True]], "fallback": [["Select", False]]}
             self.assertEqual(panel_state()["markers"], markers)
 
-            # The modified indicator follows the box, in the selected pane only; Reset
-            # from either pane restores the selected prefill.
+            # Modified marker and Reset.
             set_box("typed")
             self.assertEqual(panel_state()["modified"], ["recommended"])
             page.evaluate(f"{in_panel('.pane[data-tab=fallback] .reset')}.click()")
             self.assertEqual(box.input_value(), recommended)
             self.assertEqual(panel_state()["modified"], [])
 
-            # Clicking a tab only previews it: box, outline, pill and markers stay put.
+            # A tab click only previews.
             page.evaluate(f"{in_panel('.tab[data-tab=fallback]')}.click()")
             self.assertEqual(messages, [])
             self.assertEqual(
@@ -335,7 +334,7 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(outlined(), {approve})
             self.assertEqual(panel_state()["markers"], markers)
 
-            # Select swaps the comment, re-targets the outline, pill and markers.
+            # Select.
             page.evaluate(f"{in_panel('.pane[data-tab=fallback] .select')}.click()")
             self.assertEqual(messages, [])
             self.assertEqual(box.input_value(), fallback)
@@ -349,7 +348,7 @@ class ReviewPageTests(unittest.TestCase):
             )
             self.assertEqual(panel_state()["modified"], [])
 
-            # Selecting over an edited box asks first; a dismissed confirm changes nothing.
+            # Select over an edited box.
             set_box("typed")
             self.assertEqual(panel_state()["modified"], ["fallback"])
             page.evaluate(f"{in_panel('.tab[data-tab=recommended]')}.click()")
@@ -373,7 +372,7 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(panel_state()["markers"], markers)
             messages.clear()
 
-            # Selected tab, viewed tab, scroll position and skip reason survive a re-render.
+            # State survives a re-render.
             rerender = f"""
                 const form = document.getElementById('N_EXSP_MOD_APPR');
                 const value = document.getElementById('{COMMENT_BOX}').value;
@@ -410,7 +409,7 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(outlined(), {remap})
             self.assertEqual(box.input_value(), "prior", "Skip restores the prior comment")
 
-            # A fresh prepare starts from the recommended tab with an empty reason.
+            # A fresh prepare resets it.
             site.prepare(setup(True))
             state = panel_state()
             self.assertEqual(
@@ -422,7 +421,7 @@ class ReviewPageTests(unittest.TestCase):
             later(f"{in_panel('#skip')}.click()")
             self.assertEqual(site.await_action(), Skipped(SKIPPED))
 
-            # A re-render also restores the dry-run state; the box keeps the reviewer's text.
+            # Dry-run state survives a re-render.
             site.prepare(setup(True))
             later(f"document.getElementById('{COMMENT_BOX}').value = 'kept'; " + rerender)
             later(
@@ -442,7 +441,7 @@ class ReviewPageTests(unittest.TestCase):
 
             site.prepare(setup(False))
             later(f"document.getElementById('{DETAIL}').remove(); " + rerender)
-            self.assertEqual(site.await_action(), Skipped("reviewer left the page"))
+            self.assertEqual(site.await_action(), Skipped("left the detail page"))
             page.evaluate(f"document.body.insertAdjacentHTML('beforeend', '{fields}')")
 
             site.prepare(setup(True))
@@ -463,7 +462,7 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(messages, ["Recommended: Approve. Submit Reject anyway?"])
             self.assertEqual(posts, [])
 
-            # The fallback's button offers to switch comments: no keeps the box and blocks.
+            # The fallback's button offers to switch; declined.
             messages.clear()
             site.prepare(setup(False))
             later(press(remap))
@@ -474,7 +473,7 @@ class ReviewPageTests(unittest.TestCase):
             )
             self.assertEqual(posts, [])
 
-            # Yes selects the fallback, swaps in its comment, and the click goes through.
+            # Accepted.
             messages.clear()
             set_box("prior")
             site.prepare(setup(False))
@@ -486,7 +485,7 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(panel_state()["selected"], "fallback")
             self.assertEqual(panel_state()["pill"], "Request Remapping")
 
-            # With the fallback selected its own button needs no confirm; the other one does.
+            # With the fallback selected, the other button asks.
             messages.clear()
             site.prepare(setup(False))
             page.evaluate(f"{in_panel('.pane[data-tab=fallback] .select')}.click()")
@@ -497,7 +496,7 @@ class ReviewPageTests(unittest.TestCase):
                 messages, ["Fallback selected: Request Remapping. Submit Approve anyway?"]
             )
 
-            # Merely viewing the fallback changes nothing: the selected tab is what counts.
+            # Viewing the fallback is not selecting it.
             messages.clear()
             set_box("prior")
             site.prepare(setup(False))

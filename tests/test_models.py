@@ -40,9 +40,7 @@ class RecordTests(unittest.TestCase):
 
     def test_course_is_derived_from_the_request(self) -> None:
         _, request = records()[0]
-        self.assertEqual(
-            request.course, "EXU 1001 (Example College) -> CS3243"
-        )
+        self.assertEqual(request.course, "EXU 1001 (Example College) -> CS3243")
 
     def test_list_columns_follow_the_grid_order(self) -> None:
         # `parse_listing` zips cells with LIST_COLUMNS, so ListRow's field order is the grid's.

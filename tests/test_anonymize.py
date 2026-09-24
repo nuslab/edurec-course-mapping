@@ -50,7 +50,7 @@ class KeyTests(unittest.TestCase):
     def test_request_id_ignores_editable_content(self) -> None:
         soup = fixture("individual.html")
         first = detail(soup)
-        tag(soup, "N_EXSP_MOD_DT_N_MOD_COMMENTS$0").string = "Reviewer added a comment"
+        tag(soup, "N_EXSP_MOD_DT_N_MOD_COMMENTS$0").string = "An earlier comment"
         tag(soup, "N_EXSP_MOD_DT_N_URL$0").string = "https://example.org/new-syllabus"
         second = detail(soup)
         self.assertEqual(request_id(b"k", first.identity), request_id(b"k", second.identity))

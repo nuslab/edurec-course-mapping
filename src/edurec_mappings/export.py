@@ -19,7 +19,7 @@ from .models import (
 
 
 class ExportSite(Protocol):
-    """The navigation surface `export` needs; `EduRec` implements it against the live site."""
+    """The navigation surface `export` needs."""
 
     def search(self, partition: Partition) -> Listing: ...
     def next_page(self) -> Listing: ...

@@ -2,7 +2,7 @@
 
 ```
 <store>/requests/<request_id>/<hash>.yaml    anonymized request versions
-<store>/proposals/<request_id>/<hash>.yaml   written by the course-mapping advisor
+<store>/proposals/<request_id>/<hash>.yaml   written outside this package
 <store>/outcomes/<request_id>/<hash>.yaml    written by `review`
 <store>/documents/<url_hash>.txt             latest text per URL
 <store>/private/student_ids.yaml             request_id -> real student ID, for `review`
@@ -204,7 +204,6 @@ class Store:
         return grouped(ordered, lambda v: v.request.identity.group_key)
 
     def pending(self) -> list[Version]:
-        """Latest versions without a proposal file for that version."""
         return [version for version in self.latest() if not self.file(version, PROPOSALS).exists()]
 
     def proposal(self, version: Version) -> Proposal | None:

@@ -1,7 +1,4 @@
-"""Show each proposal on its EduRec detail page and record what the reviewer submitted.
-
-The reviewer presses EduRec's own buttons or the panel's Skip; the program never does.
-"""
+"""Show each proposal on its EduRec detail page and record what was submitted."""
 
 from __future__ import annotations
 
@@ -62,8 +59,6 @@ PANEL = TEMPLATES.get_template("panel.html")
 
 
 class Progress(NamedTuple):
-    """The header's counters: the session position and how far the store is."""
-
     position: int
     total: int
     """Requests in this session's queue."""
@@ -74,16 +69,14 @@ class Progress(NamedTuple):
 
 
 class ReviewSite(Protocol):
-    """The browser surface `review` needs; `ReviewPage` implements it against the live site."""
+    """The browser surface `review` needs."""
 
     def open(self, request: Request) -> Request:
         """Reopen the request; raises `NotInQueueError` when it left the approval queue."""
 
-    def prepare(self, setup: PanelSetup) -> None:
-        """Pre-fill the comment box and inject the panel."""
+    def prepare(self, setup: PanelSetup) -> None: ...
 
-    def await_action(self) -> Reaction:
-        """The reviewer's click, or a skip: the panel's Skip or the detail page going away."""
+    def await_action(self) -> Reaction: ...
 
     def status(self, request: Request) -> str | None:
         """The live status after the click; `NOT_IN_QUEUE` when the request left the queue."""
@@ -99,19 +92,16 @@ class QueueItem:
 
 
 def submitted(outcomes: Mapping[str, Outcome]) -> dict[str, Outcome]:
-    """The outcomes that record a submitted verdict, not a request that left the queue."""
     return {key: entry for key, entry in outcomes.items() if entry.verdict is not None}
 
 
 def action_of(entry: Outcome | Skipped) -> str:
-    """What happened, for the session log: the verdict, `not in approval queue` or `skip`."""
     if isinstance(entry, Skipped):
         return "skip"
     return entry.verdict or NOT_IN_QUEUE
 
 
 def load_outcomes(store: Store, latest: Iterable[Version]) -> dict[str, Outcome]:
-    """The review of each request's latest version, by request id."""
     outcomes: dict[str, Outcome] = {}
     for version in latest:
         outcome = store.outcome(version)
@@ -193,10 +183,7 @@ def panel_html(
     existing: str | None = None,
     courses: Mapping[str, str] | None = None,
 ) -> str:
-    """The reviewer's panel from `templates/panel.html`; every value is HTML-escaped.
-
-    `outcomes` and `courses` describe the siblings, keyed by request id.
-    """
+    """`outcomes` and `courses` describe the siblings, keyed by request id."""
     proposal = item.proposal
     return PANEL.render(
         proposal=proposal,
@@ -240,7 +227,7 @@ def review_item(
     dry_run: bool,
     record: Callable[[Outcome], None] = lambda entry: None,
 ) -> Outcome | Skipped:
-    """Show one proposal to the reviewer and return what happened.
+    """Show one proposal and return what happened.
 
     `record` is called with an unverified outcome as soon as an EduRec button is seen
     pressed, so that a failure after the click still leaves the verdict on record.
@@ -280,7 +267,7 @@ def review(
     verdicts: Iterable[str] = (),
     dry_run: bool = False,
 ) -> dict[str, Outcome | Skipped]:
-    """Walk the queue with the reviewer; returns what happened this session, by request id.
+    """Walk the queue; returns what happened this session, by request id.
 
     Each outcome is written before the next request is opened, which closes that
     request version; skips are offered again next session. A submission that could
@@ -333,6 +320,6 @@ def review(
             raise RuntimeError(f"{request_id}: submission not verified: {entry.note}")
     counts = Counter(action_of(entry) for entry in session.values())
     summary = ", ".join(f"{count} {action}" for action, count in sorted(counts.items()))
-    target = "nothing stored (dry run)" if dry_run else f"→ {store.root / OUTCOMES}"
+    target = "nothing stored (dry run)" if dry_run else f"in {store.root / OUTCOMES}"
     print(f"Reviewed {len(session)} of {len(queue)} queued: {summary or 'nothing'} {target}")
     return session

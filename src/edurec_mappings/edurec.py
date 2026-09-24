@@ -1,8 +1,4 @@
-"""Navigation of the Course Mapping Approval component through Playwright.
-
-`EduRec` is read-only; `ReviewPage` adds what the review stage needs to assist the
-human reviewer without ever pressing an EduRec action button itself.
-"""
+"""Navigation of the Course Mapping Approval component through Playwright."""
 
 from __future__ import annotations
 
@@ -70,10 +66,10 @@ BUTTONS: dict[str, Verdict] = {
 }
 """The detail page's action buttons; Cancel posts `#ICList` instead of its own id."""
 BACK_TO_LIST = "#ICList"
-REVIEWER_ACTIONS = frozenset({*BUTTONS, BACK_TO_LIST})
+WATCHED_ACTIONS = frozenset({*BUTTONS, BACK_TO_LIST})
 NOT_IN_QUEUE = "not in approval queue"
 """The live status of a request that left the approval queue."""
-SKIPPED = "skipped by the reviewer"
+SKIPPED = "skipped on the panel"
 CAP = 300  # Observed server cap; exactly 300 rows is treated as capped.
 ROW_ACTION = re.compile(r"#ICRow\d+")
 SCRIPT = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
@@ -81,18 +77,14 @@ Command = Literal["settled", "signalled", "skipped", "clicked", "comment", "inst
 
 
 def run_script(frame: Frame, command: Command, **args: object) -> object:
-    """Run one of `page.js`'s commands in the frame and return its result."""
     return frame.evaluate(SCRIPT, {"command": command, **args})
 
 
 def wait_for_script(frame: Frame, command: Command, timeout: float, **args: object) -> None:
-    """Wait until one of `page.js`'s commands returns a truthy value."""
     frame.wait_for_function(SCRIPT, arg={"command": command, **args}, timeout=timeout)
 
 
 class PanelSetup(TypedDict):
-    """What the review stage shows on a detail page; see `ReviewPage.prepare`."""
-
     panel: str
     comments: dict[Tab, str]
     """The proposal's comment per tab; the fallback only when there is one."""
@@ -103,8 +95,6 @@ class PanelSetup(TypedDict):
 
 
 class Install(TypedDict):
-    """What `page.js` needs to draw the panel and hook the buttons."""
-
     panel: str
     buttons: dict[str, Verdict]
     cancel: str
@@ -162,7 +152,6 @@ def ensure_approval(context: BrowserContext, timeout_ms: float) -> None:
 
 
 def approval_ready(context: BrowserContext) -> bool:
-    """True when exactly one signed-in Course Mapping Approval form is present."""
     try:
         mapping_frame(context)
     except (RuntimeError, PlaywrightError):
@@ -344,8 +333,6 @@ class EduRec:
 
 
 def posted(actions: Collection[str]) -> Callable[[Response], bool]:
-    """Match the PeopleSoft postback whose `ICAction` is one of `actions`."""
-
     def matches(response: Response) -> bool:
         request = response.request
         if request.method != "POST":
@@ -357,13 +344,12 @@ def posted(actions: Collection[str]) -> Callable[[Response], bool]:
 
 
 def stack(comment: str, existing: str | None) -> str:
-    """`comment` on top of any `existing` text, separated by a blank line."""
     below = (existing or "").strip()
     return f"{comment.strip()}\n\n{below}" if below else comment.strip()
 
 
 class ReviewPage(EduRec):
-    """Assists the reviewer on a detail page; the reviewer presses EduRec's own buttons.
+    """The review panel on a detail page; the program never presses EduRec's buttons.
 
     `prepare` injects the panel and a click hook on the action buttons (see `page.js`).
     `await_action` waits for the panel's Skip or an `ICStateNum` change. The posted
@@ -379,7 +365,6 @@ class ReviewPage(EduRec):
     install: Install
 
     def prepare(self, setup: PanelSetup) -> None:
-        """Put the recommended comment above the box's text and inject the panel."""
         frame = self.frame()
         self.prior_comment = frame.locator(f'[id="{COMMENT_BOX}"]').input_value()
         prefills = {tab: stack(text, self.prior_comment) for tab, text in setup["comments"].items()}
@@ -401,7 +386,6 @@ class ReviewPage(EduRec):
         run_script(self.frame(), "comment", id=COMMENT_BOX, value=value)
 
     def pending_detail(self) -> bool:
-        """Whether the frame still shows a detail page in "Pending Approval"."""
         try:
             return approval_status(self.soup()) == PENDING_APPROVAL
         except ValueError:
@@ -410,7 +394,7 @@ class ReviewPage(EduRec):
     def await_action(self) -> Reaction:
         frame = self.frame()
         seen: list[Response] = []
-        matches = posted(REVIEWER_ACTIONS)
+        matches = posted(WATCHED_ACTIONS)
 
         def on_response(response: Response) -> None:
             if matches(response):
@@ -431,7 +415,7 @@ class ReviewPage(EduRec):
                     self.settle(seen[0], previous)
                     break
                 if not self.pending_detail():
-                    return Skipped("reviewer left the page")
+                    return Skipped("left the detail page")
                 run_script(frame, "install", **self.install, fresh=False)
                 previous = current
         finally:

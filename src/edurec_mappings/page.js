@@ -17,7 +17,7 @@
                 !(typeof isLoaderInProcess === 'function' && isLoaderInProcess()) &&
                 (!target || !!document.getElementById(target));
         },
-        // The reviewer pressed the panel's Skip, or the state changed: an EduRec button was
+        // The panel's Skip was pressed, or the state changed: an EduRec button was
         // pressed, or PeopleSoft re-rendered the page on an innocuous interaction.
         signalled: ({old}) => {
             const state = stateNumber();

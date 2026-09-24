@@ -170,7 +170,7 @@ class RunTests(unittest.TestCase):
             terms=["2620"],
         )
         self.assertIn("complete: 2 requests collected", out)
-        self.assertIn("2 requests stored, 1 new versions → store", out)
+        self.assertIn("2 requests stored, 1 new versions in store", out)
         self.mocks["Store"].assert_called_once_with("store")
         self.assertEqual(self.save.call_args.args[0], collected())
         self.mocks["scrape"].assert_not_called()
