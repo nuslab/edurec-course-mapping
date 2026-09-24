@@ -309,26 +309,17 @@ def fetch_document(url: str, fetch: Fetcher, render: Renderer | None = None) -> 
     return replace(record, status="fetched")
 
 
-def attach_documents(
-    request: Request,
+def scrape(
+    requests: list[Request],
+    documents: dict[str, LinkedDocument],
     fetch: Fetcher,
-    cache: dict[str, LinkedDocument] | None = None,
     render: Renderer | None = None,
 ) -> None:
-    cache = cache if cache is not None else {}
-    documents: list[LinkedDocument] = []
-    for url in find_urls(request):
-        if url not in cache:
-            cache[url] = fetch_document(url, fetch, render)
-        documents.append(replace(cache[url]))
-    request.documents = documents
-
-
-def scrape(requests: list[Request], fetch: Fetcher, render: Renderer | None = None) -> None:
-    """Fetch every URL in the requests once and attach the documents to them."""
-    cache: dict[str, LinkedDocument] = {}
+    """Fetch every URL in the requests once into `documents`, keyed by URL."""
     for index, request in enumerate(requests, 1):
-        attach_documents(request, fetch, cache, render)
+        for url in find_urls(request):
+            if url not in documents:
+                documents[url] = fetch_document(url, fetch, render)
         print(f"Scraped URLs for {index}/{len(requests)} requests", flush=True)
 
 

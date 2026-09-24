@@ -31,6 +31,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from .documents import (
     error_summary,
+    find_urls,
     html_text,
     playwright_fetcher,
     playwright_renderer,
@@ -339,13 +340,15 @@ def collect(
     if args.documents:
         with signed_out_requests(requests, context, args) as client:
             fetch = playwright_fetcher(client, args.timeout_ms)
-            scrape(result.requests, fetch, process_renderer(args.proxy or None, args.timeout_ms))
+            render = process_renderer(args.proxy or None, args.timeout_ms)
+            scrape(result.requests, result.documents, fetch, render)
 
 
 def persist(result: ExportResult, args: argparse.Namespace) -> None:
-    """Store every collected request that is complete: with --documents, once fetched."""
-    ready = [r for r in result.requests if not args.documents or r.documents is not None]
-    added = Store(args.store).save(ready)
+    """Store the fetched documents and every collected request: with --documents, once fetched."""
+    fetched = result.documents.keys()
+    ready = [r for r in result.requests if not args.documents or set(find_urls(r)) <= fetched]
+    added = Store(args.store).save(ready, result.documents.values())
     print(f"{len(ready)} requests stored, {len(added)} new versions in {args.store}", flush=True)
 
 

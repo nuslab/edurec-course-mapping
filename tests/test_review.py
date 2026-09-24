@@ -165,6 +165,7 @@ class FakeSite:
         self.opened: list[str] = []
         self.students: list[str] = []
         self.prepared: list[tuple[str, str, bool]] = []
+        self.setups: list[PanelSetup] = []
         self.current = ""
 
     def open(self, request: Request) -> Request:
@@ -180,6 +181,7 @@ class FakeSite:
 
     def prepare(self, setup: PanelSetup) -> None:
         self.prepared.append((self.current, setup["panel"], setup["dry_run"]))
+        self.setups.append(setup)
 
     def await_action(self) -> Reaction:
         reaction = self.reactions[self.current]
@@ -556,3 +558,17 @@ class LoopTests(unittest.TestCase):
             self.assertEqual(site.prepared, [])
             self.assertIn("[", skip_reason(entry))
             self.assertEqual(stored_outcomes(store), {})
+
+    def test_bad_fallback_comment_is_withheld_but_the_recommendation_is_shown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store, (version,) = make_store(directory, count=1)
+            advice = with_fallback(version.request)
+            assert advice.fallback is not None
+            advice.fallback.comment = "Remap to CSXXXX"
+            write_proposal(store, version, advice)
+            site = FakeSite({version.request_id: Skipped("looked")})
+            review(site, store.root)
+            (setup,) = site.setups
+            self.assertEqual(setup["verdicts"], {"recommended": advice.verdict, "fallback": None})
+            self.assertEqual(setup["comments"], {"recommended": advice.comment})
+            self.assertIn("Fallback hidden: comment contains &#39;XXXX&#39;", setup["panel"])

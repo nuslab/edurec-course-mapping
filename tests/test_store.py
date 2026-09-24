@@ -3,19 +3,29 @@ import stat
 import tempfile
 import unittest
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
 from edurec_mappings.cli import run_pending
-from edurec_mappings.models import SCHEMA_VERSION, LinkedDocument, Outcome, Request, plain
+from edurec_mappings.models import (
+    SCHEMA_VERSION,
+    DocumentReference,
+    LinkedDocument,
+    Outcome,
+    Request,
+    plain,
+)
 from edurec_mappings.store import (
     HMAC_KEY,
     PROPOSALS,
     STUDENT_IDS,
     Store,
     content_hash,
-    document_path,
+    document_folder,
+    read_document,
 )
 from tests.test_cli import namespace, quietly
 from tests.test_export import records
@@ -28,18 +38,20 @@ def sample(count: int = 3) -> list[Request]:
     return [copy.deepcopy(r) for _, r in records()[:count]]
 
 
-def with_document(request: Request, text: str | None) -> Request:
+def linked(request: Request) -> Request:
     request = copy.deepcopy(request)
-    request.documents = [
-        LinkedDocument(
-            URL, status="fetched" if text else "failed", text=text, text_bytes=len(text or "")
-        )
-    ]
+    request.partner_course.supporting_url = URL
     return request
 
 
+def fetched(text: str | None, error: str = "HTTP 503") -> LinkedDocument:
+    if text is None:
+        return LinkedDocument(URL, error=error)
+    return LinkedDocument(URL, status="fetched", kind="pdf", text=text, text_bytes=len(text))
+
+
 class ContentHashTests(unittest.TestCase):
-    def test_content_hash_covers_content_and_document_text_only(self) -> None:
+    def test_content_hash_covers_content_and_document_references_only(self) -> None:
         (request,) = sample(1)
         base = content_hash(request)
         same: list[Callable[[Request], None]] = [
@@ -50,6 +62,7 @@ class ContentHashTests(unittest.TestCase):
         different: list[Callable[[Request], None]] = [
             lambda r: setattr(r, "review_comments", "new comment"),
             lambda r: setattr(r, "sibling_request_ids", ["x"]),
+            lambda r: setattr(r, "documents", [DocumentReference(URL, "documents/u/a.md")]),
         ]
         for change in same:
             changed = copy.deepcopy(request)
@@ -59,13 +72,6 @@ class ContentHashTests(unittest.TestCase):
             changed = copy.deepcopy(request)
             change(changed)
             self.assertNotEqual(content_hash(changed), base)
-        fetched = with_document(request, "Week 1")
-        self.assertNotEqual(content_hash(fetched), base)
-        self.assertNotEqual(content_hash(with_document(request, "Week 2")), content_hash(fetched))
-        metadata = copy.deepcopy(fetched)
-        assert metadata.documents is not None
-        metadata.documents[0].text_bytes, metadata.documents[0].title = 1, "T"
-        self.assertEqual(content_hash(metadata), content_hash(fetched))
         self.assertEqual(len(base), 16)
 
 
@@ -81,7 +87,7 @@ class StoreTests(unittest.TestCase):
 
     def test_layout_and_no_real_student_id_under_requests(self) -> None:
         requests = sample()
-        added = self.store.save([with_document(r, "Week 1: search") for r in requests])
+        added = self.store.save([linked(r) for r in requests], [fetched("Week 1: search")])
         self.assertEqual(len(added), 3)
         self.assertEqual(
             [p.relative_to(self.root).as_posix() for p in self.files()],
@@ -89,12 +95,16 @@ class StoreTests(unittest.TestCase):
         )
         key = self.root / HMAC_KEY
         self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
-        self.assertEqual((self.root / document_path(URL)).read_text(), "Week 1: search")
         stored = yaml.safe_load(self.files()[0].read_text())
         self.assertEqual(stored["schema_version"], SCHEMA_VERSION)
         self.assertEqual(list(stored)[:3], ["schema_version", "created_at", "request_id"])
-        self.assertNotIn("text", stored["documents"][0])
-        self.assertEqual(stored["documents"][0]["text_path"], document_path(URL))
+        (path,) = (self.root / document_folder(URL)).iterdir()
+        self.assertEqual(
+            stored["documents"], [{"url": URL, "path": path.relative_to(self.root).as_posix()}]
+        )
+        document = read_document(path)
+        self.assertEqual((document.status, document.text), ("fetched", "Week 1: search"))
+        self.assertTrue(path.read_text().startswith("---\nurl: "))
         text = "".join(p.read_text() for p in self.files())
         for request in requests:
             self.assertNotIn(request.identity.student_id, text)
@@ -180,3 +190,69 @@ class StoreTests(unittest.TestCase):
         changed.review_comments = "edited"
         self.store.save([changed])
         self.assertIn(added[1].request_id, [v.request_id for v in self.store.pending()])
+
+
+class StoredDocumentTests(unittest.TestCase):
+    """A request version changes with the text of its documents and nothing else about them."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = Store(Path(directory.name) / "store")
+        (self.request,) = sample(1)
+        self.request = linked(self.request)
+
+    def save(self, *documents: LinkedDocument) -> int:
+        """Save the request with these fetch results; the number of new versions."""
+        return len(self.store.save([copy.deepcopy(self.request)], documents))
+
+    def current(self) -> str | None:
+        (version,) = self.store.latest()
+        return version.request.documents[0].path
+
+    def statuses(self) -> list[str]:
+        return [document.status for _, document in self.store.documents(URL)]
+
+    def test_an_export_without_documents_keeps_the_version(self) -> None:
+        self.assertEqual(self.save(fetched("Week 1")), 1)
+        path = self.current()
+        self.assertEqual(self.save(), 0)
+        self.assertEqual(self.current(), path)
+
+    def test_a_failed_fetch_is_recorded_but_keeps_the_version(self) -> None:
+        self.save(fetched("Week 1"))
+        path = self.current()
+        self.assertEqual(self.save(fetched(None)), 0)
+        self.assertEqual(self.current(), path)
+        self.assertEqual(self.statuses(), ["fetched", "failed"])
+        self.assertEqual(self.save(fetched(None)), 0)
+        self.assertEqual(
+            self.statuses(), ["fetched", "failed"], "a repeated failure is not rewritten"
+        )
+        self.assertEqual(self.save(fetched("Week 1")), 0, "the same text after a failure")
+        self.assertEqual(self.statuses(), ["fetched", "failed"])
+
+    def test_new_text_is_a_new_version_and_old_text_can_return(self) -> None:
+        self.save(fetched("Week 1"))
+        first = self.current()
+        self.assertEqual(self.save(fetched("Week 2")), 1)
+        self.assertNotEqual(self.current(), first)
+        self.assertEqual(self.save(fetched("Week 1")), 1)
+        self.assertEqual(self.current(), first)
+
+    def test_a_url_read_for_the_first_time_is_a_new_version(self) -> None:
+        self.assertEqual(self.save(fetched(None)), 1)
+        self.assertIsNone(self.current())
+        self.assertEqual(self.save(fetched(None, error="HTTP 404")), 0)
+        self.assertEqual(self.statuses(), ["failed", "failed"], "a different error is recorded")
+        self.assertEqual(self.save(fetched("Week 1")), 1)
+        self.assertIsNotNone(self.current())
+
+    def test_unreadable_results_are_kept_without_text(self) -> None:
+        too_large = LinkedDocument(URL, status="too_large", error="big", text_bytes=10**6)
+        self.save(too_large)
+        path = self.current()
+        assert path is not None
+        self.assertEqual(
+            read_document(self.store.root / path), replace(too_large, fetched_at=mock.ANY)
+        )

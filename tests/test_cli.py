@@ -11,6 +11,7 @@ from unittest import mock
 from playwright.sync_api import Error as PlaywrightError
 
 from edurec_mappings import cli
+from edurec_mappings.documents import find_urls
 from edurec_mappings.edurec import COMPONENT
 from edurec_mappings.models import ExportResult, LinkedDocument, Request
 from tests.test_export import records
@@ -178,15 +179,16 @@ class RunTests(unittest.TestCase):
         self.assert_dialog_hook_removed()
 
     def test_run_scrapes_before_storing_when_asked(self) -> None:
-        def scrape(requests: list[Request], *_: object) -> None:
+        def scrape(requests: list[Request], found: dict[str, LinkedDocument], *_: object) -> None:
             for request in requests:
-                request.documents = [LinkedDocument("https://example.org")]
+                for url in find_urls(request):
+                    found[url] = LinkedDocument(url)
 
         self.mocks["scrape"].side_effect = scrape
         quietly(cli.run_export, self.context, namespace(documents=True), self.requests)
-        (stored,) = self.save.call_args.args
+        stored, documents = self.save.call_args.args
         self.assertEqual(len(stored), 2)
-        self.assertTrue(all(r.documents for r in stored))
+        self.assertTrue(documents)
 
     def test_documents_are_fetched_without_the_browser_cookies(self) -> None:
         self.context.pages[0].evaluate.return_value = "Chrome/1"

@@ -18,7 +18,7 @@ from edurec_mappings.models import (
     Partition,
     Request,
 )
-from edurec_mappings.store import Store
+from edurec_mappings.store import Store, read_document
 from tests.test_parse import detail
 
 
@@ -172,11 +172,11 @@ class ExportTests(unittest.TestCase):
         self.assertLessEqual(keys(data.requests), owned)
         self.assertEqual(data.status, "limit_reached")
 
-    def test_term_filter_leaves_documents_unset(self) -> None:
+    def test_term_filter_collects_only_that_term(self) -> None:
         data = run(FakeSite(), terms=["2610"])
         self.assertEqual(len(data.requests), 3)
         self.assertTrue(all(r.identity.term_code == "2610" for r in data.requests))
-        self.assertTrue(all(r.documents is None for r in data.requests))
+        self.assertEqual(data.documents, {})
         self.assertTrue(all(r.request_id == "" for r in data.requests), "keyed by the store")
 
     def test_scrape_stage_stores_documents_once_and_caps_their_size(self) -> None:
@@ -192,26 +192,24 @@ class ExportTests(unittest.TestCase):
                     return Fetched(200, "text/plain", b"x" * (MAX_TEXT_BYTES + 1))
                 return Fetched(200, "text/plain", b"Week 1: search")
 
-            scrape(data.requests, fetch)
+            scrape(data.requests, data.documents, fetch)
             self.assertEqual(len(calls), 2, "The shared supporting URL is fetched once")
-            added = store.save(data.requests)
+            added = store.save(data.requests, data.documents.values())
             saved = {
                 v.request_id: yaml.safe_load((store.root / v.path()).read_text()) for v in added
             }
-            (text_file,) = (store.root / "documents").iterdir()
-            self.assertEqual(text_file.read_text(), "Week 1: search")
             for request in saved.values():
-                document = request["documents"][0]
-                self.assertNotIn("text", document, "Text lives in the documents folder")
-                self.assertEqual(document["text_path"], f"documents/{text_file.name}")
+                reference = request["documents"][0]
+                document = read_document(store.root / reference["path"])
                 self.assertEqual(
-                    (document["status"], document["kind"], document["text_bytes"]),
-                    ("fetched", "text", 14),
+                    (document.status, document.kind, document.text_bytes, document.text),
+                    ("fetched", "text", 14, "Week 1: search"),
                 )
             textbook = saved[added[0].request_id]["documents"][1]
-            self.assertEqual((textbook["status"], textbook["text_path"]), ("too_large", None))
-            self.assertEqual(textbook["text_bytes"], MAX_TEXT_BYTES + 1)
-            self.assertIn("exceeds", textbook["error"])
+            document = read_document(store.root / textbook["path"])
+            self.assertEqual((document.status, document.text), ("too_large", None))
+            self.assertEqual(document.text_bytes, MAX_TEXT_BYTES + 1)
+            self.assertIn("exceeds", document.error or "")
 
     def test_single_student_capped_search_splits_mapping_groups(self) -> None:
         entries = records()[:7]

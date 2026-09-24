@@ -240,6 +240,12 @@ def review_item(
     reason = stale_reason(exported, live) or comment_problem(proposal.comment)
     if reason:
         return Skipped(reason)
+    if proposal.fallback and (problem := comment_problem(proposal.fallback.comment)):
+        # The recommendation is still usable; only the unfinished fallback is withheld.
+        proposal = replace(
+            proposal, fallback=None, fallback_rationale=f"Fallback hidden: {problem}"
+        )
+        item = replace(item, proposal=proposal)
     panel = panel_html(
         item, progress, outcomes, dry_run, existing=live.review_comments, courses=courses
     )

@@ -11,7 +11,6 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from edurec_mappings.documents import (
     Fetched,
-    attach_documents,
     clean,
     direct_url,
     error_summary,
@@ -19,6 +18,7 @@ from edurec_mappings.documents import (
     find_urls,
     process_renderer,
     run_with_deadline,
+    scrape,
 )
 from edurec_mappings.models import LinkedDocument
 from tests.test_parse import detail
@@ -123,8 +123,8 @@ class DocumentTests(unittest.TestCase):
             return Fetched(404, "text/html", b"gone")
 
         cache: dict[str, LinkedDocument] = {}
-        attach_documents(request, fetch, cache)
-        docs = request.documents or []
+        scrape([request], cache, fetch)
+        docs = list(cache.values())
         self.assertEqual([d.status for d in docs], ["fetched", "fetched", "failed"])
         self.assertIn("Syllabus week one", docs[0].text or "")
         self.assertEqual((docs[0].kind, docs[0].page_count), ("pdf", 1))
@@ -132,9 +132,8 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(docs[1].text_bytes, len(b"T\nOutline"))
         self.assertEqual(docs[2].error, "HTTP 404")
         self.assertIsNone(docs[2].text)
-        attach_documents(request, fetch, cache)
+        scrape([request], cache, fetch)
         self.assertEqual(len(calls), 3, "Cached URLs must not be fetched again")
-        self.assertIsNot((request.documents or [])[0], cache[docs[0].url])
 
     def test_fetch_errors_never_abort_collection(self) -> None:
         request = detail()
@@ -142,8 +141,9 @@ class DocumentTests(unittest.TestCase):
         def fetch(url: str) -> NoReturn:
             raise ConnectionError("network down")
 
-        attach_documents(request, fetch)
-        (document,) = request.documents or []
+        documents: dict[str, LinkedDocument] = {}
+        scrape([request], documents, fetch)
+        (document,) = documents.values()
         self.assertEqual((document.status, document.error), ("failed", "network down"))
 
     def test_script_shells_are_rendered_when_a_renderer_is_given(self) -> None:
@@ -169,8 +169,9 @@ class DocumentTests(unittest.TestCase):
                 b"<p>Course Schedule per Week</p><p>Variational Autoencoder</p></body></html>"
             )
 
-        attach_documents(request, fetch, {}, render)
-        docs = {d.url.rsplit("/", 1)[-1]: d for d in request.documents or []}
+        documents: dict[str, LinkedDocument] = {}
+        scrape([request], documents, fetch, render)
+        docs = {url.rsplit("/", 1)[-1]: d for url, d in documents.items()}
         # Only short HTML pages are rendered; the PDF and the full page are not.
         self.assertEqual(
             rendered, ["https://example.org/shell", "https://example.org/broken-shell"]

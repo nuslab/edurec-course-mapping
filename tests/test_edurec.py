@@ -452,6 +452,19 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(messages, ["Dry run: nothing is submitted"])
             self.assertEqual(posts, [])
 
+            # A live run leaves each button as EduRec rendered it, disabled ones included.
+            ids = ",".join(BUTTONS)
+            page.evaluate(
+                f"'{ids}'.split(',').forEach(id => "
+                f"document.getElementById(id).disabled = id === '{reject}')"
+            )
+            site.prepare(setup(False))
+            self.assertTrue(page.locator(f"#{reject}").is_disabled())
+            self.assertFalse(page.locator(f"#{approve}").is_disabled())
+            later(f"{in_panel('#skip')}.click()")
+            self.assertEqual(site.await_action(), Skipped(SKIPPED))
+            page.evaluate(f"document.getElementById('{reject}').disabled = false")
+
             messages.clear()
             site.prepare(setup(False))
             later(press(reject))

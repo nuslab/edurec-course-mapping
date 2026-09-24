@@ -77,7 +77,7 @@ fetched after collection, so an interruption during collection stores nothing.
 | `--reassigned-to` | Exact, case-insensitive ReassignID | All, including unassigned |
 | `--term` | One four-digit term code, e.g. `2610` | Every term in `terms.yaml` (or `--terms-file`) |
 | `--limit` | Stop after this many unique requests | All |
-| `--documents` | Fetch every URL in the course details | `documents` is `null` |
+| `--documents` | Fetch every URL in the course details | Documents already in the store are referenced |
 
 **Search subdivision.** EduRec shows at most 300 rows per search and paging
 cannot go further. Each term is searched separately; a capped search is split
@@ -153,7 +153,7 @@ course-mappings/
 ├── requests/<request_id>/<hash>.yaml    # pseudonymized request versions (export)
 ├── proposals/<request_id>/<hash>.yaml   # proposals (by a reviewer or an agent)
 ├── outcomes/<request_id>/<hash>.yaml    # submitted verdicts (review)
-├── documents/<url_hash>.txt             # latest scraped text per URL
+├── documents/<url_hash>/<hash>.md       # fetch results per URL: front matter + text
 └── private/                             # keep private
     ├── student_ids.yaml                 # request_id -> real student ID; read only by review
     └── hmac_key                         # back it up
@@ -162,8 +162,14 @@ course-mappings/
 - **Request file**: the fields are defined by `models.Request`; a proposal's by
   `models.Proposal`.
   `sibling_request_ids` lists only siblings found in the same export.
-- **`<hash>`** covers the request content, including linked document text,
-  comments and siblings, but not EduRec status or fetch metadata. An export
+- **Document file**: the fields of `models.LinkedDocument` as front matter and
+  the text as the body. A result that repeats the newest one is not written
+  again; a readable result is compared with the newest readable one.
+- **`documents`** in a request file gives each URL's newest readable result
+  (`path`, `null` if none). It comes from the store, not the export, so an
+  export without `--documents` or a failed fetch leaves it unchanged.
+- **`<hash>`** covers the request content, including those document
+  references, comments and siblings, but not EduRec status. An export
   writes a file only when the hash differs from the latest version (the one
   with the newest `created_at`); returning to earlier content rewrites that
   file with a new `created_at`.

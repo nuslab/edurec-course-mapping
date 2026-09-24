@@ -4,7 +4,7 @@
 <store>/requests/<request_id>/<hash>.yaml    pseudonymized request versions
 <store>/proposals/<request_id>/<hash>.yaml   written by a reviewer or an agent
 <store>/outcomes/<request_id>/<hash>.yaml    written by `review`
-<store>/documents/<url_hash>.txt             latest text per URL
+<store>/documents/<url_hash>/<hash>.md       fetch results per URL: front matter and text
 <store>/private/student_ids.yaml             request_id -> real student ID, for `review`
 <store>/private/hmac_key                     the key of every request_id and pseudonym
 ```
@@ -20,13 +20,14 @@ import json
 import os
 import secrets
 from collections.abc import Callable, Hashable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
-from .models import Outcome, Proposal, Request, hydrate, plain
+from .documents import find_urls
+from .models import DocumentReference, LinkedDocument, Outcome, Proposal, Request, hydrate, plain
 from .pseudonymize import pseudonymize
 
 REQUESTS = "requests"
@@ -36,8 +37,9 @@ DOCUMENTS = "documents"
 PRIVATE = "private"
 STUDENT_IDS = f"{PRIVATE}/student_ids.yaml"
 HMAC_KEY = f"{PRIVATE}/hmac_key"
-UNHASHED = {"schema_version", "created_at", "approval_status", "documents"}
-"""Request fields outside the content hash; documents enter it as text digests."""
+UNHASHED = {"schema_version", "created_at", "approval_status"}
+"""Request fields outside the content hash."""
+FRONT_MATTER = "---\n"
 
 
 def now() -> str:
@@ -71,24 +73,37 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def document_path(url: str) -> str:
-    """Store-relative file for a URL's text; the same URL always maps to one file."""
-    return f"{DOCUMENTS}/{sha256(url)[:16]}.txt"
+def document_folder(url: str) -> str:
+    """Store-relative folder of a URL's results; the same URL always maps to one folder."""
+    return f"{DOCUMENTS}/{sha256(url)[:16]}"
+
+
+def document_hash(document: LinkedDocument) -> str:
+    """Digest of a fetch result: what was read, not when."""
+    content = plain(document, exclude={"fetched_at"}) | {"text": document.text}
+    return sha256(json.dumps(content, sort_keys=True))[:16]
+
+
+def dump_document(document: LinkedDocument) -> str:
+    return f"{FRONT_MATTER}{dump(plain(document))}{FRONT_MATTER}{document.text or ''}"
+
+
+def read_document(path: Path) -> LinkedDocument:
+    """Load a document file; a `ValueError` names the file."""
+    content = path.read_text(encoding="utf-8")
+    header, separator, body = content.removeprefix(FRONT_MATTER).partition(f"\n{FRONT_MATTER}")
+    try:
+        if not content.startswith(FRONT_MATTER) or not separator:
+            raise ValueError("no front matter")
+        document = hydrate(LinkedDocument, yaml.safe_load(header))
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from error
+    return replace(document, text=body if document.status == "fetched" else None)
 
 
 def content_hash(request: Request) -> str:
-    """Digest of what a proposal rests on: the request and the text of its documents.
-
-    Fetch metadata, the EduRec status and the storage fields are left out. The text
-    is only in memory while exporting, so the hash is computed before a version is written.
-    """
-    content = plain(request, exclude=UNHASHED)
-    if request.documents is not None:
-        content["documents"] = [
-            {"url": document.url, "text": None if document.text is None else sha256(document.text)}
-            for document in request.documents
-        ]
-    return sha256(json.dumps(content, sort_keys=True))[:16]
+    """Digest of what a proposal rests on, including the stored documents it refers to."""
+    return sha256(json.dumps(plain(request, exclude=UNHASHED), sort_keys=True))[:16]
 
 
 def link_siblings(requests: list[Request]) -> None:
@@ -151,12 +166,14 @@ class Store:
             raise ValueError(f"{path} is not a mapping")
         return {str(key): str(value) for key, value in data.items()}
 
-    def save(self, requests: Iterable[Request]) -> list[Version]:
-        """Store the export's requests; returns the versions that were new.
+    def save(
+        self, requests: Iterable[Request], documents: Iterable[LinkedDocument] = ()
+    ) -> list[Version]:
+        """Store the export's documents and requests; returns the versions that were new.
 
-        Each request is pseudonymized and hashed; it is written as a new version unless its
-        latest stored version has the same hash. Document text is (over)written per URL,
-        and the real student IDs are merged into `private/student_ids.yaml` first.
+        Each request is pseudonymized, refers to the stored documents of its URLs and is
+        hashed; it is written as a new version unless its latest stored version has the
+        same hash. The real student IDs are merged into `private/student_ids.yaml` first.
         """
         requests = list(requests)
         key = self.hmac_key()
@@ -168,13 +185,11 @@ class Store:
             for request, pseudonymous in zip(requests, stored, strict=True)
         )
         write_atomic(self.root / STUDENT_IDS, dump(dict(sorted(student_ids.items()))))
+        self.save_documents(documents)
         latest = {version.request_id: version.hash for version in self.latest()}
         added: list[Version] = []
         for request in stored:
-            for document in request.documents or []:
-                if document.text is not None:
-                    document.text_path = document_path(document.url)
-                    write_atomic(self.root / document.text_path, document.text)
+            request.documents = [self.reference(url) for url in find_urls(request)]
             digest = content_hash(request)
             if latest.get(request.request_id) == digest:
                 continue
@@ -183,6 +198,33 @@ class Store:
             write_atomic(self.file(version), dump(plain(request)))
             added.append(version)
         return added
+
+    def documents(self, url: str) -> list[tuple[str, LinkedDocument]]:
+        """The URL's recorded results with their store-relative paths, oldest first."""
+        folder = self.root / document_folder(url)
+        found = [(path, read_document(path)) for path in folder.glob("*.md")]
+        found.sort(key=lambda item: item[1].fetched_at or "")
+        return [(path.relative_to(self.root).as_posix(), document) for path, document in found]
+
+    def reference(self, url: str) -> DocumentReference:
+        readable = [path for path, stored in self.documents(url) if stored.status != "failed"]
+        return DocumentReference(url, readable[-1] if readable else None)
+
+    def save_documents(self, documents: Iterable[LinkedDocument]) -> None:
+        """Record each fetch result unless it repeats the newest one.
+
+        A readable result is compared with the newest readable one, so a failure in
+        between is no change; returning to older content rewrites that file as the newest.
+        """
+        for document in documents:
+            history = [stored for _, stored in self.documents(document.url)]
+            if document.status != "failed":
+                history = [stored for stored in history if stored.status != "failed"]
+            digest = document_hash(document)
+            if history and document_hash(history[-1]) == digest:
+                continue
+            path = self.root / document_folder(document.url) / f"{digest}.md"
+            write_atomic(path, dump_document(replace(document, fetched_at=now())))
 
     def versions(self) -> Iterator[Version]:
         for path in sorted((self.root / REQUESTS).glob("*/*.yaml")):

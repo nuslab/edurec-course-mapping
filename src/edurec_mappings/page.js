@@ -120,7 +120,8 @@
         for (const id of [...Object.keys(buttons), cancel]) {
             const button = document.getElementById(id);
             if (!button) continue;
-            if (id !== cancel) button.disabled = dryRun;
+            // Outside a dry run the button keeps the state PeopleSoft gave it.
+            if (dryRun && id !== cancel) button.disabled = true;
             listen(button, 'click', event => {
                 const verdict = buttons[id];
                 if (dryRun && verdict) {

@@ -21,7 +21,7 @@ Verdict = Literal["approve", "reject", "request_remapping", "request_more_inform
 Confidence = Literal["high", "medium", "low"]
 Tab = Literal["recommended", "fallback"]
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 TERM_PATTERN = re.compile(r"\d{4}")
 PENDING_APPROVAL = "Pending Approval"
 ADAPTERS: dict[type, TypeAdapter[Any]] = {}
@@ -220,7 +220,7 @@ class NusCourse:
 
 @dataclass
 class LinkedDocument:
-    """A URL found in the course details and what could be read from it."""
+    """One fetch of a URL found in the course details and what could be read from it."""
 
     url: str
     status: FetchStatus = "failed"
@@ -231,10 +231,19 @@ class LinkedDocument:
     page_count: int | None = None
     text_bytes: int | None = None
     """Size of the extracted text, recorded even when it was too large to keep."""
-    text_path: str | None = None
-    """Store-relative file holding the extracted text."""
+    fetched_at: str | None = None
+    """Set by the store when it records the fetch."""
     text: Annotated[str | None, Field(exclude=True)] = None
-    """Held in memory until the store writes it to `text_path`; never serialised."""
+    """Kept only when fetched; stored as the body of the document file."""
+
+
+@dataclass
+class DocumentReference:
+    """A URL in a request and the stored document it was read from."""
+
+    url: str
+    path: str | None
+    """The newest result that is not `failed`; None while the URL has never been read."""
 
 
 @dataclass(kw_only=True)
@@ -259,8 +268,8 @@ class Request:
     """Prior administrative review comments."""
     sibling_request_ids: list[str] = field(default_factory=list)
     """Other requests in the same mapping group that the same export collected."""
-    documents: list[LinkedDocument] | None = None
-    """None when the export did not fetch documents."""
+    documents: list[DocumentReference] = field(default_factory=list)
+    """Set by the store from the documents it holds, not from what an export fetched."""
 
     @property
     def course(self) -> str:
@@ -274,11 +283,13 @@ class Request:
 
 @dataclass
 class ExportResult:
-    """One export in memory: how far the scan got and the unique requests it collected."""
+    """One export in memory: how far the scan got and what it collected."""
 
     status: ExportStatus = "in_progress"
     error: str | None = None
     requests: list[Request] = field(default_factory=list)
+    documents: dict[str, LinkedDocument] = field(default_factory=dict)
+    """Fetched documents by URL."""
 
 
 @dataclass
