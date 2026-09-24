@@ -1,8 +1,21 @@
 # edurec-course-mapping
 
-Read-only extraction of NUS EduRec **Course Mapping Approval** requests into an
-append-only store of pseudonymized YAML files, plus a guided `review` session for
-submitting proposals in EduRec.
+Tooling for deciding NUS EduRec **Course Mapping Approval** requests:
+
+- `export` collects the requests into an append-only store of pseudonymized
+  YAML files, splitting searches around EduRec's 300-row cap, and with
+  `--documents` fetches and extracts the syllabi and pages linked from their
+  course details (PDF, Word, HTML, Dropbox, Google Drive and Docs).
+- `pending` lists the request versions still awaiting a proposal, with
+  sibling parts of a many-to-one mapping together.
+- `validate` checks proposal files.
+- `review` walks the proposals on their EduRec detail pages, pre-fills the
+  comment box, and records and verifies the verdict the reviewer submits.
+- `fetch` and `render` read single links, including script-rendered pages,
+  that an export could not.
+
+Export only reads EduRec; review fills in the comment box and watches for the
+reviewer's click, but never presses a verdict button itself.
 
 It is specific to the NUS EduRec (PeopleSoft) component and needs an account
 with access to Course Mapping Approval. Proposals are written by a human

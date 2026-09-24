@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "edurec-course-mapping"
 version = "0.1.0"
-description = "Read-only extraction of NUS EduRec course mapping approval requests to YAML"
+description = "Collect NUS EduRec course mapping requests and their linked documents into a pseudonymized store, track and validate proposals for them, and submit the proposals in a guided EduRec review"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

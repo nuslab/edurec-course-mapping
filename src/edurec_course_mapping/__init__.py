@@ -1,1 +1,1 @@
-"""Read-only extraction of NUS EduRec course mapping approval requests."""
+"""Collect NUS EduRec course mapping requests, track proposals and submit them in EduRec."""
