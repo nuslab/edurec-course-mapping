@@ -30,7 +30,7 @@ edurec-course-mapping = "edurec_course_mapping.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-edurec_course_mapping = ["terms.yaml", "page.js", "templates/*"]
+edurec_course_mapping = ["py.typed", "terms.yaml", "page.js", "templates/*"]
 
 [tool.ruff]
 line-length = 100
