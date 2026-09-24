@@ -115,7 +115,7 @@ def load_queue(
 ) -> list[QueueItem]:
     """Latest versions with a proposal and no outcome, in store order (siblings consecutive).
 
-    The stored request is anonymized; its real student ID comes from
+    The stored request is pseudonymized; its real student ID comes from
     `private/student_ids.yaml` so that EduRec can be searched for it.
     """
     student_ids = store.student_ids()

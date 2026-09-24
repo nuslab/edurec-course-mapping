@@ -1,8 +1,13 @@
 # edurec-mappings
 
 Read-only extraction of NUS EduRec **Course Mapping Approval** requests into an
-append-only store of anonymized YAML files, plus a guided `review` session for
+append-only store of pseudonymized YAML files, plus a guided `review` session for
 submitting proposals in EduRec.
+
+It is specific to the NUS EduRec (PeopleSoft) component and needs an account
+with access to Course Mapping Approval. Proposals are written by a human
+reviewer or an agent, one per request version; this package collects the
+requests and submits the proposals, it does not make them.
 
 ## Layout
 
@@ -14,7 +19,7 @@ edurec-mappings/
 │   ├── edurec.py           # EduRec navigation and the review page
 │   ├── parse.py            # list and detail HTML into records
 │   ├── documents.py        # fetching and text extraction of linked URLs
-│   ├── anonymize.py        # keyed request ids and student pseudonyms
+│   ├── pseudonymize.py     # keyed request ids and student pseudonyms
 │   ├── store.py            # versions, proposals, outcomes, student IDs
 │   ├── review.py           # guided review
 │   ├── models.py           # dataclasses and strict YAML I/O
@@ -24,31 +29,33 @@ edurec-mappings/
 └── tests/
 ```
 
-Runtime data lives in `../edurec-data/` (outside Git): the store in
+Runtime data lives in `../data/`, outside the repository: the store in
 `course-mappings/` and the EduRec login in `browser-profile/`.
 
 ## Setup
 
-The devcontainer installs the package; rebuild it after changing dependencies.
-Manually:
+The devcontainer (`.devcontainer/`) provides Python 3.14, Chromium and a desktop,
+installs the package in editable mode, and keeps `../data/` in the
+`edurec-mappings-data` Docker volume across rebuilds. Rebuild it after changing
+dependencies. Without it, on Python 3.14 or later:
 
 ```sh
 pip install -e '.[dev]'
 python3 -m playwright install chromium
 ```
 
-Log in through the desktop on forwarded port **6080** (password `vscode`; keep
-the port private). Commands open Chromium on that desktop.
-EduRec must be accessed from the NUS network.
+In the devcontainer, log in through the desktop on forwarded port **6080**
+(password `vscode`; keep the port private). Commands open Chromium on that
+desktop. EduRec must be accessed from the NUS network.
 
 ## Commands
 
 Run from this directory; default paths are relative to it.
 
 ```sh
-edurec-mappings export --documents --store ../edurec-data/course-mappings
-edurec-mappings pending --store ../edurec-data/course-mappings
-edurec-mappings review --store ../edurec-data/course-mappings --dry-run
+edurec-mappings export --documents --store ../data/course-mappings
+edurec-mappings pending --store ../data/course-mappings
+edurec-mappings review --store ../data/course-mappings --dry-run
 edurec-mappings render URL
 ```
 
@@ -59,7 +66,7 @@ rest.
 ### export
 
 Waits for the approval form after login (Enter retries), searches, switches the
-grid to **View 100**, opens every matching request and adds the anonymized
+grid to **View 100**, opens every matching request and adds the pseudonymized
 requests to the store. It prints the status (`complete`, `limit_reached`
 or `interrupted`) and the number of new versions. An interrupted export exits
 with an error but stores what it collected; with `--documents` documents are
@@ -136,10 +143,15 @@ headless browser without login. For retrying links an export recorded as
 
 Exports only add or rewrite files; nothing is deleted.
 
+The store is personal data. Request files carry a pseudonym instead of the
+student ID, but `private/` maps pseudonyms back to student IDs, and comments and
+linked documents are stored as written. Keep the store out of version control
+and shared folders.
+
 ```
 course-mappings/
-├── requests/<request_id>/<hash>.yaml    # anonymized request versions (export)
-├── proposals/<request_id>/<hash>.yaml   # proposals (not written by this package)
+├── requests/<request_id>/<hash>.yaml    # pseudonymized request versions (export)
+├── proposals/<request_id>/<hash>.yaml   # proposals (by a reviewer or an agent)
 ├── outcomes/<request_id>/<hash>.yaml    # submitted verdicts (review)
 ├── documents/<url_hash>.txt             # latest scraped text per URL
 └── private/                             # keep private
@@ -147,7 +159,8 @@ course-mappings/
     └── hmac_key                         # back it up
 ```
 
-- **Request file**: the fields are defined by `models.Request`.
+- **Request file**: the fields are defined by `models.Request`; a proposal's by
+  `models.Proposal`.
   `sibling_request_ids` lists only siblings found in the same export.
 - **`<hash>`** covers the request content, including linked document text,
   comments and siblings, but not EduRec status or fetch metadata. An export
@@ -178,3 +191,7 @@ ruff format . && ruff check --fix . && mypy && pytest
 
 Tests use `tests/fixtures/` and local headless Chromium with intercepted
 requests; they never contact EduRec.
+
+## License
+
+MIT; see `LICENSE`.

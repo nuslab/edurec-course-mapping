@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,10 @@ name = "edurec-mappings"
 version = "0.1.0"
 description = "Read-only extraction of NUS EduRec course mapping approval requests to YAML"
 readme = "README.md"
-requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Muhammad Rizki Aulia Rahman Maulana" }]
+requires-python = ">=3.14"
 dependencies = [
     "beautifulsoup4>=4.12,<5",
     "Jinja2>=3.1,<4",
@@ -31,7 +34,7 @@ edurec_mappings = ["terms.yaml", "page.js", "templates/*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py314"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -42,7 +45,7 @@ ignore = ["PLR0913", "PLR2004"]
 "tests/*" = ["PLR0913", "PLR0915", "PLC1901"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.14"
 strict = true
 files = ["src", "tests"]
 warn_unreachable = true

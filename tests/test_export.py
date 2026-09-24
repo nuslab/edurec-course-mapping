@@ -23,7 +23,7 @@ from tests.test_parse import detail
 
 
 def run(
-    site: "FakeSite",
+    site: FakeSite,
     reassigned_to: str = "",
     limit: int | None = None,
     terms: list[str] | None = None,

@@ -45,7 +45,7 @@ from edurec_mappings.store import OUTCOMES, PROPOSALS, Store, Version, dump, loa
 from tests.test_export import records
 
 if TYPE_CHECKING:
-    from typing_extensions import Unpack
+    from typing import Unpack
 
 STARTED = "2026-09-22T10:00:00+00:00"
 

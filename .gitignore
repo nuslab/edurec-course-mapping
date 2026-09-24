@@ -9,3 +9,12 @@ dist/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# Stores and browser profiles hold student data; keep them outside Git
+requests/
+proposals/
+outcomes/
+documents/
+private/
+data/
+browser-profile/

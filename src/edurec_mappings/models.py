@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields, replace
-from typing import Annotated, Any, Literal, NamedTuple, TypeVar, cast
+from typing import Annotated, Any, Literal, NamedTuple, cast
 
 from pydantic import Field, TypeAdapter
 
@@ -24,13 +24,10 @@ Tab = Literal["recommended", "fallback"]
 SCHEMA_VERSION = 8
 TERM_PATTERN = re.compile(r"\d{4}")
 PENDING_APPROVAL = "Pending Approval"
-
-
-T = TypeVar("T")
 ADAPTERS: dict[type, TypeAdapter[Any]] = {}
 
 
-def adapter(kind: type[T]) -> TypeAdapter[T]:
+def adapter[T](kind: type[T]) -> TypeAdapter[T]:
     if kind not in ADAPTERS:
         ADAPTERS[kind] = TypeAdapter(kind)
     return ADAPTERS[kind]
@@ -46,7 +43,7 @@ def plain(record: object, exclude: set[str] | None = None) -> dict[str, object]:
     return cast("dict[str, object]", data)
 
 
-def hydrate(cls: type[T], data: object) -> T:
+def hydrate[T](cls: type[T], data: object) -> T:
     """Rebuild a record from its `plain` form: no coercion, no unknown keys.
 
     Strict Python mode accepts only dataclass instances, never a mapping, hence the
@@ -245,7 +242,7 @@ class Request:
     """A Course Mapping Approval request with everything a mapping decision needs.
 
     As parsed it carries the real student ID and no `request_id`; the store writes it
-    anonymized, with the keyed `request_id`, a pseudonym and `created_at`.
+    pseudonymized, with the keyed `request_id`, a pseudonym and `created_at`.
     """
 
     schema_version: int = SCHEMA_VERSION

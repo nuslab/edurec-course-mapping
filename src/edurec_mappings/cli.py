@@ -1,7 +1,7 @@
 """Extract EduRec course mapping approval requests and review proposals for them.
 
 `export` extracts requests from EduRec (read-only navigation), with --documents
-fetches the URLs in their course details, and adds anonymized request versions to
+fetches the URLs in their course details, and adds pseudonymized request versions to
 the store. `pending` lists the request versions still awaiting a proposal. `review`
 shows each proposal on its EduRec page. `render URL` prints the text of
 one page after its scripts have run, for links the export could not read.
@@ -99,7 +99,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     browser = argparse.ArgumentParser(add_help=False, parents=[store])
     add = browser.add_argument
     add("--cdp-url", help="Attach to the existing exploration browser")
-    add("--profile", default="../edurec-data/browser-profile")
+    add("--profile", default="../data/browser-profile")
     add("--proxy", default="")
     add("--timeout", type=int, default=60)
     add("--skip-login", action="store_true", help="Skip the login prompt; approval must be open")
@@ -262,7 +262,7 @@ def wait_for_enter(seconds: float) -> bool:
     """Return True if a line arrives on stdin within `seconds` (False on non-tty EOF)."""
     try:
         ready, _, _ = select.select([sys.stdin], [], [], seconds)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return False
     if not ready:
         return False

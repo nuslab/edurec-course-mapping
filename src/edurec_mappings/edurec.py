@@ -154,7 +154,7 @@ def ensure_approval(context: BrowserContext, timeout_ms: float) -> None:
 def approval_ready(context: BrowserContext) -> bool:
     try:
         mapping_frame(context)
-    except (RuntimeError, PlaywrightError):
+    except RuntimeError, PlaywrightError:
         return False
     return True
 

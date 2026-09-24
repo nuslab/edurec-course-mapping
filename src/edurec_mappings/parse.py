@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import TypeVar
 
 from bs4 import BeautifulSoup, Tag
 from bs4.element import PageElement
@@ -28,8 +27,6 @@ COUNTER = "win0divPTS_CFG_CL_STD_RSLGP$0"
 NEXT = "PTS_CFG_CL_STD_RSL$hdown$0"
 VIEW_ALL = "PTS_CFG_CL_STD_RSL$hviewall$0"
 DETAIL = "N_EXSP_MOD_DT_TRNSFR_EQVLNCY_GRP$0"
-
-T = TypeVar("T")
 
 
 def text(node: PageElement | None) -> str | None:
@@ -98,7 +95,7 @@ def parse_detail(soup: BeautifulSoup, term_code: str | None) -> Request:
     def field(suffix: str) -> str | None:
         return detail_field(soup, suffix)
 
-    def table(prefix: str, record: Callable[..., T], width: int) -> list[T]:
+    def table[T](prefix: str, record: Callable[..., T], width: int) -> list[T]:
         pattern = re.compile("^tr" + re.escape(prefix) + r"\$0_row\d+$")
         result: list[T] = []
         for tr in soup.find_all("tr", id=pattern):

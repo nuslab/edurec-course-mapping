@@ -1,8 +1,8 @@
-"""The append-only store: anonymized request versions, proposals, outcomes and scraped documents.
+"""The append-only store: pseudonymized request versions, proposals, outcomes and scraped documents.
 
 ```
-<store>/requests/<request_id>/<hash>.yaml    anonymized request versions
-<store>/proposals/<request_id>/<hash>.yaml   written outside this package
+<store>/requests/<request_id>/<hash>.yaml    pseudonymized request versions
+<store>/proposals/<request_id>/<hash>.yaml   written by a reviewer or an agent
 <store>/outcomes/<request_id>/<hash>.yaml    written by `review`
 <store>/documents/<url_hash>.txt             latest text per URL
 <store>/private/student_ids.yaml             request_id -> real student ID, for `review`
@@ -21,14 +21,13 @@ import os
 import secrets
 from collections.abc import Callable, Hashable, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
 
 import yaml
 
-from .anonymize import anonymize
 from .models import Outcome, Proposal, Request, hydrate, plain
+from .pseudonymize import pseudonymize
 
 REQUESTS = "requests"
 PROPOSALS = "proposals"
@@ -40,11 +39,9 @@ HMAC_KEY = f"{PRIVATE}/hmac_key"
 UNHASHED = {"schema_version", "created_at", "approval_status", "documents"}
 """Request fields outside the content hash; documents enter it as text digests."""
 
-T = TypeVar("T")
-
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def write_atomic(path: Path, content: str) -> None:
@@ -62,7 +59,7 @@ def load(path: Path) -> object:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def read(cls: type[T], path: Path) -> T:
+def read[T](cls: type[T], path: Path) -> T:
     """Load a record file; a `ValueError` names the file."""
     try:
         return hydrate(cls, load(path))
@@ -104,7 +101,7 @@ def link_siblings(requests: list[Request]) -> None:
         request.sibling_request_ids = [r for r in siblings if r != request.request_id]
 
 
-def grouped(items: Iterable[T], key: Callable[[T], Hashable]) -> list[T]:
+def grouped[T](items: Iterable[T], key: Callable[[T], Hashable]) -> list[T]:
     """`items` with equal keys moved together, at the position of the first of them."""
     items = list(items)
     first: dict[Hashable, int] = {}
@@ -157,18 +154,18 @@ class Store:
     def save(self, requests: Iterable[Request]) -> list[Version]:
         """Store the export's requests; returns the versions that were new.
 
-        Each request is anonymized and hashed; it is written as a new version unless its
+        Each request is pseudonymized and hashed; it is written as a new version unless its
         latest stored version has the same hash. Document text is (over)written per URL,
         and the real student IDs are merged into `private/student_ids.yaml` first.
         """
         requests = list(requests)
         key = self.hmac_key()
-        stored = [anonymize(request, key) for request in requests]
+        stored = [pseudonymize(request, key) for request in requests]
         link_siblings(stored)
         student_ids = self.student_ids()
         student_ids.update(
-            (anonymous.request_id, request.identity.student_id)
-            for request, anonymous in zip(requests, stored, strict=True)
+            (pseudonymous.request_id, request.identity.student_id)
+            for request, pseudonymous in zip(requests, stored, strict=True)
         )
         write_atomic(self.root / STUDENT_IDS, dump(dict(sorted(student_ids.items()))))
         latest = {version.request_id: version.hash for version in self.latest()}

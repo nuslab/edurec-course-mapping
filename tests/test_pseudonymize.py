@@ -2,8 +2,8 @@ import copy
 import hmac
 import unittest
 
-from edurec_mappings.anonymize import anonymize, pseudonym, request_id
 from edurec_mappings.models import Identity, plain
+from edurec_mappings.pseudonymize import pseudonym, pseudonymize, request_id
 from tests.test_export import records
 from tests.test_parse import detail, fixture, tag
 
@@ -27,13 +27,13 @@ class KeyTests(unittest.TestCase):
         expected = hmac.new(b"k", b"A0000001X", "sha256").hexdigest()[:12]
         self.assertEqual(pseudonym(b"k", "A0000001X"), f"student-{expected}")
 
-    def test_anonymize_leaves_the_original_untouched(self) -> None:
+    def test_pseudonymize_leaves_the_original_untouched(self) -> None:
         _, request = records()[0]
         before = plain(request)
-        anonymous = anonymize(request, b"k")
+        pseudonymous = pseudonymize(request, b"k")
         self.assertEqual(plain(request), before)
-        self.assertEqual(anonymous.request_id, request_id(b"k", request.identity))
-        self.assertTrue(anonymous.identity.student_id.startswith("student-"))
+        self.assertEqual(pseudonymous.request_id, request_id(b"k", request.identity))
+        self.assertTrue(pseudonymous.identity.student_id.startswith("student-"))
 
     def test_group_key_uses_student_and_not_sequence(self) -> None:
         soup = fixture("individual.html")

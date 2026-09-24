@@ -28,7 +28,7 @@ def pseudonym(key: bytes, student_id: str) -> str:
     return f"student-{keyed(key, student_id, 12)}"
 
 
-def anonymize(request: Request, key: bytes) -> Request:
+def pseudonymize(request: Request, key: bytes) -> Request:
     """A copy keyed by `request_id` with the student ID replaced; the original is untouched."""
     result = copy.deepcopy(request)
     result.request_id = request_id(key, request.identity)

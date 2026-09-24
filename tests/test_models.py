@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import yaml
 
@@ -33,7 +33,7 @@ class RecordTests(unittest.TestCase):
             ("fallback_verdict", "reject"),
             ("remap", {"analysis": "no target"}),
             # An unquoted YAML timestamp loads as a datetime, which JSON cannot hold.
-            ("comment", datetime(2026, 9, 22, tzinfo=timezone.utc)),
+            ("comment", datetime(2026, 9, 22, tzinfo=UTC)),
         ]:
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                 hydrate(Proposal, {**valid, field: value})
