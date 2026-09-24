@@ -7,8 +7,8 @@ from unittest import mock
 from playwright.sync_api import Dialog, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
-from edurec_mappings import edurec
-from edurec_mappings.edurec import (
+from edurec_course_mapping import edurec
+from edurec_course_mapping.edurec import (
     BUTTONS,
     CANCEL,
     COMMENT_BOX,
@@ -19,10 +19,10 @@ from edurec_mappings.edurec import (
     ReviewPage,
     stack,
 )
-from edurec_mappings.models import PENDING_APPROVAL, Clicked, Skipped, Verdict
-from edurec_mappings.parse import DETAIL
-from edurec_mappings.review import VERDICT_LABELS, QueueItem, panel_html, panel_setup
-from edurec_mappings.store import Version
+from edurec_course_mapping.models import PENDING_APPROVAL, Clicked, Skipped, Verdict
+from edurec_course_mapping.parse import DETAIL
+from edurec_course_mapping.review import VERDICT_LABELS, QueueItem, panel_html, panel_setup
+from edurec_course_mapping.store import Version
 from tests.test_export import records
 from tests.test_parse import fixture, tag
 from tests.test_review import FALLBACK, PROGRESS, with_fallback

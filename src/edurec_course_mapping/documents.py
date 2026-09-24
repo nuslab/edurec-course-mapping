@@ -407,7 +407,7 @@ def process_renderer(
         options += ["--proxy", proxy]
 
     def render(url: str) -> bytes:
-        command = [sys.executable, "-m", "edurec_mappings", "render", "--html", *options, url]
+        command = [sys.executable, "-m", "edurec_course_mapping", "render", "--html", *options, url]
         return run_with_deadline(command, deadline_s)
 
     return render

@@ -96,7 +96,7 @@ def configured_terms(path: str | Path) -> list[str]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="edurec-mappings", description=__doc__)
+    parser = argparse.ArgumentParser(prog="edurec-course-mapping", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     store = argparse.ArgumentParser(add_help=False)
     store.add_argument("--store", required=True, help="The append-only request store")

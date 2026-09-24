@@ -1,5 +1,5 @@
 {
-  "name": "edurec-mappings",
+  "name": "edurec-course-mapping",
   // Ubuntu 26.04 with Python 3.14 and Chromium; keep its version equal to the
   // Playwright package installed below.
   "image": "mcr.microsoft.com/playwright/python:v1.63.0-resolute",
@@ -9,6 +9,6 @@
   // Chromium runs out of shared memory without it.
   "runArgs": ["--ipc=host"],
   // ../data holds the store and the EduRec login; a volume survives rebuilds.
-  "mounts": ["source=edurec-mappings-data,target=/workspaces/data,type=volume"],
+  "mounts": ["source=edurec-course-mapping-data,target=/workspaces/data,type=volume"],
   "postCreateCommand": "pip install -e '.[dev]' playwright==1.63.0"
 }

@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 
 import yaml
 
-from edurec_mappings.models import LIST_COLUMNS, Proposal, Request, hydrate, plain
-from edurec_mappings.store import dump
+from edurec_course_mapping.models import LIST_COLUMNS, Proposal, Request, hydrate, plain
+from edurec_course_mapping.store import dump
 from tests.test_export import records
 from tests.test_review import FALLBACK, proposal
 

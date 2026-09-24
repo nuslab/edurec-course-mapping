@@ -7,10 +7,10 @@ from unittest import mock
 
 import yaml
 
-from edurec_mappings.cli import configured_terms
-from edurec_mappings.documents import MAX_TEXT_BYTES, Fetched, scrape
-from edurec_mappings.export import export, restore_list, subdivide
-from edurec_mappings.models import (
+from edurec_course_mapping.cli import configured_terms
+from edurec_course_mapping.documents import MAX_TEXT_BYTES, Fetched, scrape
+from edurec_course_mapping.export import export, restore_list, subdivide
+from edurec_course_mapping.models import (
     ExportResult,
     GridCounter,
     Listing,
@@ -18,7 +18,7 @@ from edurec_mappings.models import (
     Partition,
     Request,
 )
-from edurec_mappings.store import Store, read_document
+from edurec_course_mapping.store import Store, read_document
 from tests.test_parse import detail
 
 

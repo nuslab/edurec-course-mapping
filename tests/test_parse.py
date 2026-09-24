@@ -3,8 +3,8 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup, Tag
 
-from edurec_mappings.models import GridCounter, Request
-from edurec_mappings.parse import (
+from edurec_course_mapping.models import GridCounter, Request
+from edurec_course_mapping.parse import (
     GRID,
     VIEW_ALL,
     approval_status,

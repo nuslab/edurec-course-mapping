@@ -9,8 +9,8 @@ from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
-from edurec_mappings.edurec import NOT_IN_QUEUE, SKIPPED, NotInQueueError, PanelSetup
-from edurec_mappings.models import (
+from edurec_course_mapping.edurec import NOT_IN_QUEUE, SKIPPED, NotInQueueError, PanelSetup
+from edurec_course_mapping.models import (
     PENDING_APPROVAL,
     Clicked,
     Confidence,
@@ -25,7 +25,7 @@ from edurec_mappings.models import (
     hydrate,
     plain,
 )
-from edurec_mappings.review import (
+from edurec_course_mapping.review import (
     OVERLAP_FAIR,
     OVERLAP_GOOD,
     Progress,
@@ -42,7 +42,7 @@ from edurec_mappings.review import (
     review,
     stale_reason,
 )
-from edurec_mappings.store import OUTCOMES, PROPOSALS, Store, Version, dump, load
+from edurec_course_mapping.store import OUTCOMES, PROPOSALS, Store, Version, dump, load
 from tests.test_export import records
 
 if TYPE_CHECKING:

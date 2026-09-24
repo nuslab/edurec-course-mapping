@@ -53,7 +53,7 @@ FRESHNESS_FIELDS = (
     "identity.sequence",
 )
 TEMPLATES = Environment(
-    loader=PackageLoader("edurec_mappings"), autoescape=True, undefined=StrictUndefined
+    loader=PackageLoader("edurec_course_mapping"), autoescape=True, undefined=StrictUndefined
 )
 PANEL = TEMPLATES.get_template("panel.html")
 

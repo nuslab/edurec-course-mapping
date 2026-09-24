@@ -9,8 +9,8 @@ from unittest import mock
 
 import yaml
 
-from edurec_mappings.cli import run_pending
-from edurec_mappings.models import (
+from edurec_course_mapping.cli import run_pending
+from edurec_course_mapping.models import (
     SCHEMA_VERSION,
     DocumentReference,
     LinkedDocument,
@@ -18,7 +18,7 @@ from edurec_mappings.models import (
     Request,
     plain,
 )
-from edurec_mappings.store import (
+from edurec_course_mapping.store import (
     HMAC_KEY,
     PROPOSALS,
     STUDENT_IDS,

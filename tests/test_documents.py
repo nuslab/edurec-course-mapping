@@ -9,7 +9,7 @@ from unittest.mock import patch
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from edurec_mappings.documents import (
+from edurec_course_mapping.documents import (
     Fetched,
     clean,
     direct_url,
@@ -20,7 +20,7 @@ from edurec_mappings.documents import (
     run_with_deadline,
     scrape,
 )
-from edurec_mappings.models import LinkedDocument
+from edurec_course_mapping.models import LinkedDocument
 from tests.test_parse import detail
 
 
@@ -314,7 +314,7 @@ class DocumentTests(unittest.TestCase):
         def fetch(url: str) -> Fetched:
             return Fetched(next(statuses), "text/plain", b"Outline")
 
-        with patch("edurec_mappings.documents.time.sleep") as sleep:
+        with patch("edurec_course_mapping.documents.time.sleep") as sleep:
             self.assertEqual(fetch_document("https://example.org/a", fetch).status, "fetched")
             self.assertEqual(fetch_document("https://example.org/b", fetch).error, "HTTP 503")
         self.assertEqual(sleep.call_count, 2)
@@ -330,13 +330,15 @@ class DocumentTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
 
     def test_process_renderer_runs_render_html_with_the_export_settings(self) -> None:
-        with patch("edurec_mappings.documents.run_with_deadline", return_value=b"<p>x</p>") as run:
+        with patch(
+            "edurec_course_mapping.documents.run_with_deadline", return_value=b"<p>x</p>"
+        ) as run:
             html = process_renderer("socks5://proxy:1080", 60000, 5000)("https://example.org/#/c")
         self.assertEqual(html, b"<p>x</p>")
         command, deadline = run.call_args.args
         self.assertEqual(
             " ".join(command[1:]),
-            "-m edurec_mappings render --html --timeout 60 --settle 5.0"
+            "-m edurec_course_mapping render --html --timeout 60 --settle 5.0"
             " --proxy socks5://proxy:1080 https://example.org/#/c",
         )
         self.assertEqual(deadline, 95)

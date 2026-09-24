@@ -10,10 +10,10 @@ from unittest import mock
 
 from playwright.sync_api import Error as PlaywrightError
 
-from edurec_mappings import cli
-from edurec_mappings.documents import find_urls
-from edurec_mappings.edurec import COMPONENT
-from edurec_mappings.models import ExportResult, LinkedDocument, Request
+from edurec_course_mapping import cli
+from edurec_course_mapping.documents import find_urls
+from edurec_course_mapping.edurec import COMPONENT
+from edurec_course_mapping.models import ExportResult, LinkedDocument, Request
 from tests.test_export import records
 
 DUPLICATES = RuntimeError("Found 2 Course Mapping Approval frames.")

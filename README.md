@@ -1,4 +1,4 @@
-# edurec-mappings
+# edurec-course-mapping
 
 Read-only extraction of NUS EduRec **Course Mapping Approval** requests into an
 append-only store of pseudonymized YAML files, plus a guided `review` session for
@@ -12,8 +12,8 @@ requests and submits the proposals, it does not make them.
 ## Layout
 
 ```
-edurec-mappings/
-├── src/edurec_mappings/
+edurec-course-mapping/
+├── src/edurec_course_mapping/
 │   ├── cli.py              # subcommands, login prompt, browser lifecycle
 │   ├── export.py           # cap-aware search loop and its subdivision
 │   ├── edurec.py           # EduRec navigation and the review page
@@ -36,7 +36,7 @@ Runtime data lives in `../data/`, outside the repository: the store in
 
 The devcontainer (`.devcontainer/`) provides Python 3.14, Chromium and a desktop,
 installs the package in editable mode, and keeps `../data/` in the
-`edurec-mappings-data` Docker volume across rebuilds. Rebuild it after changing
+`edurec-course-mapping-data` Docker volume across rebuilds. Rebuild it after changing
 dependencies. Without it, on Python 3.14 or later:
 
 ```sh
@@ -53,12 +53,12 @@ desktop. EduRec must be accessed from the NUS network.
 Run from this directory; default paths are relative to it.
 
 ```sh
-edurec-mappings export --documents --store ../data/course-mappings
-edurec-mappings pending --store ../data/course-mappings
-edurec-mappings review --store ../data/course-mappings --dry-run
-edurec-mappings validate PROPOSAL...
-edurec-mappings fetch URL
-edurec-mappings render URL
+edurec-course-mapping export --documents --store ../data/course-mappings
+edurec-course-mapping pending --store ../data/course-mappings
+edurec-course-mapping review --store ../data/course-mappings --dry-run
+edurec-course-mapping validate PROPOSAL...
+edurec-course-mapping fetch URL
+edurec-course-mapping render URL
 ```
 
 `--cdp-url` attaches `export` or `review` to a running, logged-in Chromium and

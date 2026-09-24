@@ -2,8 +2,8 @@ import copy
 import hmac
 import unittest
 
-from edurec_mappings.models import Identity, plain
-from edurec_mappings.pseudonymize import pseudonym, pseudonymize, request_id
+from edurec_course_mapping.models import Identity, plain
+from edurec_course_mapping.pseudonymize import pseudonym, pseudonymize, request_id
 from tests.test_export import records
 from tests.test_parse import detail, fixture, tag
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "edurec-mappings"
+name = "edurec-course-mapping"
 version = "0.1.0"
 description = "Read-only extraction of NUS EduRec course mapping approval requests to YAML"
 readme = "README.md"
@@ -24,13 +24,13 @@ dependencies = [
 dev = ["ruff>=0.6", "mypy>=1.10", "pytest>=8", "types-PyYAML", "pypdf>=4,<7"]
 
 [project.scripts]
-edurec-mappings = "edurec_mappings.cli:main"
+edurec-course-mapping = "edurec_course_mapping.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-edurec_mappings = ["terms.yaml", "page.js", "templates/*"]
+edurec_course_mapping = ["terms.yaml", "page.js", "templates/*"]
 
 [tool.ruff]
 line-length = 100
