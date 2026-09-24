@@ -326,6 +326,88 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(stdout.buffer.getvalue().decode(), html)
 
 
+class ValidateTests(unittest.TestCase):
+    GOOD = "verdict: approve\ncomment: Approved.\noverlap_percent: 80\nconfidence: high\n"
+
+    def validate(self, files: dict[str, str]) -> tuple[list[str], int, list[str]]:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [str(Path(directory) / name) for name in files]
+            for path, content in zip(paths, files.values(), strict=True):
+                if content:
+                    Path(path).write_text(content)
+            with redirect_stdout(io.StringIO()) as out:
+                code = cli.run_validate(cli.parse_args(["validate", *paths]))
+        return out.getvalue().splitlines(), code, paths
+
+    def test_prints_ok_when_every_file_loads(self) -> None:
+        self.assertEqual(self.validate({"good.yaml": self.GOOD})[:2], (["ok"], 0))
+
+    def test_prints_one_error_line_per_bad_file(self) -> None:
+        lines, code, paths = self.validate(
+            {
+                "placeholder.yaml": self.GOOD + "fallback: {verdict: reject, comment: CSXXXX}\n",
+                "typo.yaml": self.GOOD.replace("approve", "Approve"),
+                "broken.yaml": "verdict: [",
+                "missing.yaml": "",
+            }
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[0], f"error: {paths[0]}: fallback.comment contains 'XXXX'")
+        self.assertIn("verdict", lines[1])
+        self.assertEqual([line.split(": ")[1] for line in lines], paths)
+
+
+class FetchTests(unittest.TestCase):
+    def run_fetch(self, argv: list[str], document: LinkedDocument) -> tuple[str, int, mock.Mock]:
+        with (
+            mock.patch.object(cli, "sync_playwright"),
+            mock.patch.object(cli, "signed_out_requests"),
+            mock.patch.object(cli, "playwright_fetcher"),
+            mock.patch.object(cli, "process_renderer") as renderer,
+            mock.patch.object(cli, "fetch_document", return_value=document) as fetch,
+        ):
+            args = cli.parse_args(["fetch", *argv])
+            with redirect_stdout(io.StringIO()) as out:
+                code = cli.run_fetch(args)
+        renderer.assert_called_once_with(args.proxy or None, args.timeout_ms, args.settle * 1000)
+        return out.getvalue(), code, fetch
+
+    def test_prints_the_header_and_the_text(self) -> None:
+        url = "https://www.dropbox.com/s/x/syllabus.pdf?dl=0"
+        document = LinkedDocument(url, "fetched", kind="pdf", title="Syllabus", text="Week 1")
+        out, code, fetch = self.run_fetch([url, "--proxy", "socks5://h:1080"], document)
+        self.assertEqual(
+            out,
+            "status: fetched\nkind: pdf\ntitle: Syllabus\n"
+            "url: https://www.dropbox.com/s/x/syllabus.pdf?dl=1\n\nWeek 1\n",
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(fetch.call_args.kwargs["all_files"])
+
+    def test_failures_and_large_texts_print_only_the_header(self) -> None:
+        url = "https://drive.google.com/drive/folders/F"
+        failed = LinkedDocument(url, error="HTTP 404")
+        out, code, fetch = self.run_fetch([url, "--all-files", "--settle", "2"], failed)
+        self.assertEqual((out, code), (f"status: failed\nurl: {url}\nerror: HTTP 404\n", 1))
+        self.assertTrue(fetch.call_args.kwargs["all_files"])
+        large = LinkedDocument(url, "too_large", error="Too big", kind="folder", title="Course")
+        out, code, _ = self.run_fetch([url], large)
+        self.assertEqual(code, 0)
+        self.assertIn("title: Course\n", out)
+        self.assertTrue(out.endswith("error: Too big\n"))
+
+
+class SignedOutRequestsTests(unittest.TestCase):
+    def test_a_headless_user_agent_is_sent_as_plain_chrome(self) -> None:
+        context, factory = mock.MagicMock(), mock.MagicMock()
+        context.pages[0].evaluate.return_value = "Mozilla/5.0 HeadlessChrome/150.0 Safari/537.36"
+        with cli.signed_out_requests(factory, context, namespace()):
+            pass
+        factory.new_context.assert_called_once_with(
+            user_agent="Mozilla/5.0 Chrome/150.0 Safari/537.36", proxy=None
+        )
+
+
 class ForgetDownloadsTests(unittest.TestCase):
     def test_clears_the_history_tables(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

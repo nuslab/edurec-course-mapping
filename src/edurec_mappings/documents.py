@@ -250,21 +250,34 @@ def download(url: str, fetch: Fetcher) -> tuple[str | None, bytes]:
     return content_type, data
 
 
-def drive_folder(url: str, folder_id: str, fetch: Fetcher) -> LinkedDocument:
-    """Read the files at the top of a shared Drive folder; subfolders are not followed.
+def folder_listing(folder_id: str, fetch: Fetcher) -> BeautifulSoup:
+    """A shared Drive folder's embeddable view.
 
     The folder page lists its files only after scripts run, but the embeddable view is
     plain HTML linking each file, which then downloads like a shared file link.
     """
     _, listing = download(f"https://drive.google.com/embeddedfolderview?id={folder_id}", fetch)
-    soup = BeautifulSoup(listing, "html.parser")
+    return BeautifulSoup(listing, "html.parser")
+
+
+def folder_files(
+    listing: BeautifulSoup, fetch: Fetcher, recursive: bool = False, prefix: str = ""
+) -> list[BundleFile]:
+    """The first files at the top of a listed folder, or with `recursive` every file below it."""
+    entries = listing.select(".flip-entry")
     files: list[BundleFile] = []
-    for entry in soup.select(".flip-entry")[:MAX_FOLDER_FILES]:
+    for entry in entries if recursive else entries[:MAX_FOLDER_FILES]:
         link, name = entry.select_one("a[href]"), entry.select_one(".flip-entry-title")
         if link is None or name is None:
             continue
-        href = str(link["href"])
-        if DRIVE_FOLDER.match(urlsplit(href).path):
+        href, path = str(link["href"]), prefix + name.get_text(strip=True)
+        if subfolder := DRIVE_FOLDER.match(urlsplit(href).path):
+            if recursive:
+                try:
+                    sublisting = folder_listing(subfolder.group(1), fetch)
+                    files += folder_files(sublisting, fetch, True, f"{path}/")
+                except Exception as error:
+                    files.append((f"{path}/", None, error))
             continue
         content_type: str | None = None
         data: bytes | Exception
@@ -272,21 +285,31 @@ def drive_folder(url: str, folder_id: str, fetch: Fetcher) -> LinkedDocument:
             content_type, data = download(direct_url(href), fetch)
         except Exception as error:
             data = error
-        files.append((name.get_text(strip=True), content_type, data))
+        files.append((path, content_type, data))
+    return files
+
+
+def drive_folder(
+    url: str, folder_id: str, fetch: Fetcher, recursive: bool = False
+) -> LinkedDocument:
+    listing = folder_listing(folder_id, fetch)
+    files = folder_files(listing, fetch, recursive)
     if not files:
         raise ValueError("Folder lists no files")
-    title = soup.title.string.strip() if soup.title and soup.title.string else None
+    title = listing.title.string.strip() if listing.title and listing.title.string else None
     return LinkedDocument(url, kind="folder", text=bundle_text(files), title=title)
 
 
-def fetch_document(url: str, fetch: Fetcher, render: Renderer | None = None) -> LinkedDocument:
+def fetch_document(
+    url: str, fetch: Fetcher, render: Renderer | None = None, all_files: bool = False
+) -> LinkedDocument:
     """Fetch one URL; every failure is recorded in the result rather than raised."""
     target = direct_url(url)
     parts = urlsplit(url)
     folder = DRIVE_FOLDER.match(parts.path) if parts.netloc.lower() == "drive.google.com" else None
     try:
         if folder:
-            record = drive_folder(url, folder.group(1), fetch)
+            record = drive_folder(url, folder.group(1), fetch, all_files)
         else:
             record = extract_text(url, *download(target, fetch))
             if render is not None:

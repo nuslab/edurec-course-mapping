@@ -243,6 +243,43 @@ class DocumentTests(unittest.TestCase):
         self.assertIn("=== Syllabus.pdf ===\nWeek one", doc.text or "")
         self.assertEqual(len(calls), 3, "Subfolders are not followed")
 
+    def test_all_files_reads_every_file_of_every_subfolder(self) -> None:
+        def listing(title: str, *entries: str) -> bytes:
+            return f"<html><title>{title}</title><body>{''.join(entries)}</body></html>".encode()
+
+        top = [
+            folder_entry(f"https://drive.google.com/file/d/T{i}/view", f"{i:02}.txt")
+            for i in range(21)
+        ]
+        pages = {
+            "FOLDER": listing(
+                "Course", *top, folder_entry("https://drive.google.com/drive/folders/SUB", "Weeks")
+            ),
+            "SUB": listing(
+                "Weeks",
+                folder_entry("https://drive.google.com/drive/folders/DEEP", "Late"),
+                folder_entry("https://drive.google.com/file/d/W1/view", "Week 1.txt"),
+            ),
+            "DEEP": listing(
+                "Late", folder_entry("https://drive.google.com/file/d/W9/view", "Week 9.txt")
+            ),
+        }
+
+        def fetch(url: str) -> Fetched:
+            query = url.rpartition("id=")[2]
+            if query in pages:
+                return Fetched(200, "text/html", pages[query])
+            return Fetched(200, "text/plain", f"text of {query}".encode())
+
+        url = "https://drive.google.com/drive/folders/FOLDER"
+        doc = fetch_document(url, fetch, all_files=True)
+        self.assertEqual((doc.status, doc.title), ("fetched", "Course"))
+        text = doc.text or ""
+        self.assertIn("=== 20.txt ===\ntext of T20", text)
+        self.assertIn("=== Weeks/Week 1.txt ===\ntext of W1", text)
+        self.assertIn("=== Weeks/Late/Week 9.txt ===\ntext of W9", text)
+        self.assertNotIn("20.txt", fetch_document(url, fetch).text or "")
+
     def test_sign_in_and_bot_block_pages_are_failures(self) -> None:
         def fetch(url: str) -> Fetched:
             title = "Google Drive: Sign-in" if "drive" in url else "Request Rejected"

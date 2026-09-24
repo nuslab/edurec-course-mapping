@@ -159,13 +159,21 @@ def stale_reason(exported: Request, live: Request) -> str | None:
     return None
 
 
-def comment_problem(comment: str) -> str | None:
+def comment_problem(comment: str, field: str = "comment") -> str | None:
     if not comment.strip():
-        return "comment is empty"
+        return f"{field} is empty"
     for marker in ("[", "XXXX"):
         if marker in comment:
-            return f"comment contains {marker!r}"
+            return f"{field} contains {marker!r}"
     return None
+
+
+def proposal_problems(proposal: Proposal) -> list[str]:
+    """What review would refuse or withhold: an unfinished comment or fallback comment."""
+    problems = [comment_problem(proposal.comment)]
+    if proposal.fallback:
+        problems.append(comment_problem(proposal.fallback.comment, "fallback.comment"))
+    return [problem for problem in problems if problem]
 
 
 def overlap_colour(percent: int) -> str:

@@ -3,8 +3,9 @@
 `export` extracts requests from EduRec (read-only navigation), with --documents
 fetches the URLs in their course details, and adds pseudonymized request versions to
 the store. `pending` lists the request versions still awaiting a proposal. `review`
-shows each proposal on its EduRec page. `render URL` prints the text of
-one page after its scripts have run, for links the export could not read.
+shows each proposal on its EduRec page. `validate` checks proposal files as review
+loads them. `fetch URL` reads one link as the export does, for links it could not
+read; `render URL` prints one page after its scripts have run.
 """
 
 from __future__ import annotations
@@ -30,7 +31,9 @@ from playwright.sync_api import (
 from playwright.sync_api import Error as PlaywrightError
 
 from .documents import (
+    direct_url,
     error_summary,
+    fetch_document,
     find_urls,
     html_text,
     playwright_fetcher,
@@ -40,9 +43,9 @@ from .documents import (
 )
 from .edurec import COMPONENT, EduRec, ReviewPage, approval_ready, ensure_approval
 from .export import export
-from .models import TERM_PATTERN, ExportResult, Verdict
-from .review import review
-from .store import Store
+from .models import TERM_PATTERN, ExportResult, Proposal, Verdict
+from .review import proposal_problems, review
+from .store import Store, read
 
 LOGIN_PROMPT = (
     "Log in and accept the policy if you agree. The program continues automatically once "
@@ -141,17 +144,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--verdict", dest="verdicts", action="append", default=[], choices=VERDICTS)
     add("--dry-run", action="store_true", help="Disable the action buttons; only Skip advances")
 
-    render_parser = commands.add_parser(
-        "render",
-        help="Print the text of one page after its scripts have run",
-        description="Print the text of a page after its scripts have run (headless, no login)",
-    )
-    add = render_parser.add_argument
+    commands.add_parser(
+        "validate",
+        help="Check proposal files as review loads them",
+    ).add_argument("proposals", nargs="+", metavar="PROPOSAL")
+
+    rendering = argparse.ArgumentParser(add_help=False)
+    add = rendering.add_argument
     add("url")
     add("--proxy", default="")
     add("--timeout", type=int, default=90)
     add("--settle", type=float, default=8, help="Seconds to wait after network idle")
-    add("--html", action="store_true", help="Write the rendered HTML instead of its text")
+
+    commands.add_parser(
+        "fetch",
+        parents=[rendering],
+        help="Print what the export reads from one link",
+        description="Fetch one URL as export --documents does, without storing it",
+    ).add_argument(
+        "--all-files", action="store_true", help="Read every file of a Drive folder, recursively"
+    )
+
+    commands.add_parser(
+        "render",
+        parents=[rendering],
+        help="Print the text of one page after its scripts have run",
+        description="Print the text of a page after its scripts have run (headless, no login)",
+    ).add_argument(
+        "--html", action="store_true", help="Write the rendered HTML instead of its text"
+    )
 
     args = parser.parse_args(argv)
     if "timeout" in args:
@@ -168,6 +189,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run_pending(args: argparse.Namespace) -> None:
     for version in Store(args.store).pending():
         print(version.path())
+
+
+def run_validate(args: argparse.Namespace) -> int:
+    errors: list[str] = []
+    for name in args.proposals:
+        try:
+            problems = proposal_problems(read(Proposal, Path(name)))
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            problems = [" ".join(str(error.__cause__ or error).split())]
+        if problems:
+            errors.append(f"error: {name}: {'; '.join(problems)}")
+    print("\n".join(errors) or "ok")
+    return 1 if errors else 0
+
+
+def run_fetch(args: argparse.Namespace) -> int:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            with signed_out_requests(playwright.request, browser.new_context(), args) as client:
+                document = fetch_document(
+                    args.url,
+                    playwright_fetcher(client, args.timeout_ms),
+                    process_renderer(args.proxy or None, args.timeout_ms, args.settle * 1000),
+                    all_files=args.all_files,
+                )
+        finally:
+            browser.close()
+    header = {
+        "status": document.status,
+        "kind": document.kind,
+        "title": document.title,
+        "url": direct_url(args.url),
+        "error": document.error,
+    }
+    for key, value in header.items():
+        if value is not None:
+            print(f"{key}: {value}")
+    if document.text:
+        print(f"\n{document.text}")
+    return 1 if document.status == "failed" else 0
 
 
 def run_render(args: argparse.Namespace) -> None:
@@ -219,11 +281,13 @@ def signed_out_requests(
     """An HTTP client with the browser's user agent and proxy but none of its cookies.
 
     Linked URLs are entered by students; fetched with the EduRec session, a link to a
-    page that only the signed-in account can open would have its text stored.
+    page that only the signed-in account can open would have its text stored. A headless
+    browser's user agent is sent as plain Chrome, which some sites would otherwise block.
     """
     page = context.pages[0] if context.pages else context.new_page()
+    user_agent = page.evaluate("() => navigator.userAgent")
     requests = factory.new_context(
-        user_agent=page.evaluate("() => navigator.userAgent"),
+        user_agent=user_agent.replace("HeadlessChrome", "Chrome"),
         proxy={"server": args.proxy} if args.proxy else None,
     )
     try:
@@ -388,6 +452,10 @@ def run_review(context: BrowserContext, args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.command == "validate":
+        sys.exit(run_validate(args))
+    if args.command == "fetch":
+        sys.exit(run_fetch(args))
     if args.command == "render":
         run_render(args)
         return

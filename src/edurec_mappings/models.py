@@ -295,7 +295,7 @@ class ExportResult:
 @dataclass
 class Remap:
     target: str
-    """A course code, or a levelled dummy course such as "3000-level unrestricted elective"."""
+    """An NUS course code, possibly a PE or UE dummy code such as "CS2003"."""
     analysis: str | None = None
 
 

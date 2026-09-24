@@ -56,6 +56,8 @@ Run from this directory; default paths are relative to it.
 edurec-mappings export --documents --store ../data/course-mappings
 edurec-mappings pending --store ../data/course-mappings
 edurec-mappings review --store ../data/course-mappings --dry-run
+edurec-mappings validate PROPOSAL...
+edurec-mappings fetch URL
 edurec-mappings render URL
 ```
 
@@ -133,11 +135,22 @@ A submitted verdict is written to `outcomes/<request_id>/<hash>.yaml` with
 once the request has left the queue; a request that had already left gets
 `verdict: null`. Skips are offered again next session.
 
+### validate
+
+Checks proposal files as `review` loads them, including its comment checks.
+Prints `ok` or one error line per bad file.
+
+### fetch
+
+Reads one URL as `export --documents` does, without storing it, and prints the
+result's status, kind, title, URL and error, then its text. For retrying links an
+export recorded as `empty` or `failed`. The re-render takes `--timeout` and
+`--settle`; `--all-files` reads a whole Drive folder, subfolders included.
+
 ### render
 
 Prints the title and text of one page after its scripts have run, in a fresh
-headless browser without login. For retrying links an export recorded as
-`empty` or `failed`. `--html` writes the rendered HTML instead.
+headless browser without login. `--html` writes the rendered HTML instead.
 
 ## Store
 
@@ -163,8 +176,10 @@ course-mappings/
   `models.Proposal`.
   `sibling_request_ids` lists only siblings found in the same export.
 - **Document file**: the fields of `models.LinkedDocument` as front matter and
-  the text as the body. A result that repeats the newest one is not written
-  again; a readable result is compared with the newest readable one.
+  the text as the body. `status` is `fetched`, `empty` (no text found),
+  `too_large` or `failed`; only `fetched` keeps the text. A result that repeats
+  the newest one is not written again; a readable result is compared with the
+  newest readable one.
 - **`documents`** in a request file gives each URL's newest readable result
   (`path`, `null` if none). It comes from the store, not the export, so an
   export without `--documents` or a failed fetch leaves it unchanged.

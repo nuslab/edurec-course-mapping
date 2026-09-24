@@ -38,6 +38,7 @@ from edurec_mappings.review import (
     overlap_colour,
     panel_html,
     panel_setup,
+    proposal_problems,
     review,
     stale_reason,
 )
@@ -267,6 +268,17 @@ class QueueTests(unittest.TestCase):
         self.assertIn("empty", comment_problem("  ") or "")
         self.assertIn("[", comment_problem("Fill in [course]") or "")
         self.assertIn("XXXX", comment_problem("Consider remapping to CSXXXX.") or "")
+
+    def test_proposal_problems_name_the_comment_fields(self) -> None:
+        request = records()[0][1]
+        self.assertEqual(proposal_problems(proposal(request)), [])
+        unfinished = proposal(
+            request, comment=" ", fallback=Fallback(verdict="reject", comment="Use [course]")
+        )
+        self.assertEqual(
+            proposal_problems(unfinished),
+            ["comment is empty", "fallback.comment contains '['"],
+        )
 
 
 class PanelTests(unittest.TestCase):
