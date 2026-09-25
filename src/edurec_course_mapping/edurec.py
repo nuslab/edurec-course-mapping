@@ -9,8 +9,7 @@ from typing import Literal, TypedDict
 from urllib.parse import parse_qs
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import BrowserContext, Frame, Locator, Response
-from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import BrowserContext, Frame, Locator, Page, Response
 
 from .models import (
     PENDING_APPROVAL,
@@ -42,6 +41,8 @@ SEARCH = "PTS_CFG_CL_WRK_PTS_SRCH_BTN"
 COMPONENT = (
     "https://edurec.nus.edu.sg/psp/cs90prd/EMPLOYEE/SA/c/N_STUDENT_RECORDS.N_EXSP_MOD_APPR.GBL"
 )
+SSO_LINK = '.nus_sso_login a[href$="?ncmd=slogin"]'
+SSO_HOST = "https://login.microsoftonline.com/"
 TARGET_FRAME = 'iframe[name="TargetContent"]'
 APPROVAL_FORM = 'form[name="win0"][id="N_EXSP_MOD_APPR"]'
 FIELDS = (
@@ -106,10 +107,6 @@ class Install(TypedDict):
     dry_run: bool
 
 
-class ApprovalNotLoadedError(RuntimeError):
-    """No frame shows the Course Mapping Approval form, e.g. only the dashboard is open."""
-
-
 class NotInQueueError(RuntimeError):
     """The request's identity search found no row: it left the approval queue."""
 
@@ -122,7 +119,7 @@ def mapping_frame(context: BrowserContext) -> Frame:
         if frame.locator(APPROVAL_FORM).count()
     ]
     if not candidates:
-        raise ApprovalNotLoadedError(
+        raise RuntimeError(
             "Course Mapping Approval is not loaded. Open the approval component, "
             "not just the dashboard, and wait for its search form."
         )
@@ -134,29 +131,31 @@ def mapping_frame(context: BrowserContext) -> Frame:
     return candidates[0]
 
 
-def open_component(context: BrowserContext, timeout_ms: float) -> None:
-    page = context.pages[0]
-    page.goto(COMPONENT, timeout=timeout_ms)
+def wait_for_approval(page: Page, timeout_ms: float) -> None:
     page.frame_locator(TARGET_FRAME).locator(APPROVAL_FORM).wait_for(
         state="attached", timeout=timeout_ms
     )
 
 
-def ensure_approval(context: BrowserContext, timeout_ms: float) -> None:
-    """Require the approval form, opening the component when only the dashboard is up."""
-    try:
-        mapping_frame(context)
-    except ApprovalNotLoadedError:
-        open_component(context, timeout_ms)
-        mapping_frame(context)
+def sign_in(page: Page, timeout_ms: float) -> None:
+    """Follow the sign-in page's SSO link, then reopen the component.
 
-
-def approval_ready(context: BrowserContext) -> bool:
-    try:
-        mapping_frame(context)
-    except RuntimeError, PlaywrightError:
-        return False
-    return True
+    SSO prompts, if any, wait in the browser without a timeout.
+    """
+    link = page.locator(SSO_LINK)
+    if not link.count():
+        return
+    # The sign-in page's own URL passes the check below, so first wait to leave for SSO.
+    with page.expect_response(
+        lambda response: response.url.startswith(SSO_HOST), timeout=timeout_ms
+    ):
+        link.click()
+    page.wait_for_url(
+        lambda url: url.startswith("https://edurec.nus.edu.sg/psp/") and "cmd=login" not in url,
+        timeout=0,
+    )
+    if page.url != COMPONENT:
+        page.goto(COMPONENT, timeout=timeout_ms)
 
 
 class EduRec:

@@ -11,7 +11,6 @@ read; `render URL` prints one page after its scripts have run.
 from __future__ import annotations
 
 import argparse
-import select
 import sqlite3
 import sys
 from collections.abc import Iterator
@@ -41,17 +40,22 @@ from .documents import (
     process_renderer,
     scrape,
 )
-from .edurec import COMPONENT, EduRec, ReviewPage, approval_ready, ensure_approval
+from .edurec import (
+    COMPONENT,
+    EduRec,
+    ReviewPage,
+    sign_in,
+    wait_for_approval,
+)
 from .export import export
 from .models import TERM_PATTERN, ExportResult, Proposal, Verdict
 from .review import proposal_problems, review
 from .store import Store, read
 
 LOGIN_PROMPT = (
-    "Log in and accept the policy if you agree. The program continues automatically once "
-    "the Course Mapping Approval form is visible; press Enter to retry immediately: "
+    "Signing in through NUS SSO, accepting the terms on EduRec's sign-in page. "
+    "Complete any SSO prompts in the browser."
 )
-POLL_SECONDS = 3.0
 DOWNLOAD_TABLES = ("downloads", "downloads_url_chains", "downloads_slices")
 REVIEW_NOTICE = (
     "Only clicks made while this program shows its panel are logged; "
@@ -102,11 +106,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     store.add_argument("--store", required=True, help="The append-only request store")
     browser = argparse.ArgumentParser(add_help=False, parents=[store])
     add = browser.add_argument
-    add("--cdp-url", help="Attach to the existing exploration browser")
     add("--profile", default="../data/browser-profile")
     add("--proxy", default="")
     add("--timeout", type=int, default=60)
-    add("--skip-login", action="store_true", help="Skip the login prompt; approval must be open")
 
     export_parser = commands.add_parser(
         "export",
@@ -252,13 +254,7 @@ def run_render(args: argparse.Namespace) -> None:
 
 @contextmanager
 def browser_context(playwright: Playwright, args: argparse.Namespace) -> Iterator[BrowserContext]:
-    """Attach to a debugging endpoint (left open) or launch a persistent profile (closed)."""
-    if args.cdp_url:
-        browser = playwright.chromium.connect_over_cdp(args.cdp_url, timeout=args.timeout_ms)
-        if len(browser.contexts) != 1:
-            raise RuntimeError("Expected one browser context")
-        yield browser.contexts[0]
-        return
+    """Launch the persistent profile, closed on exit."""
     profile = Path(args.profile)
     forget_downloads(profile)
     context = playwright.chromium.launch_persistent_context(
@@ -323,40 +319,17 @@ def fit_to_screen(context: BrowserContext) -> None:
     cdp.detach()
 
 
-def wait_for_enter(seconds: float) -> bool:
-    """Return True if a line arrives on stdin within `seconds` (False on non-tty EOF)."""
-    try:
-        ready, _, _ = select.select([sys.stdin], [], [], seconds)
-    except OSError, ValueError:
-        return False
-    if not ready:
-        return False
-    return bool(sys.stdin.readline())
-
-
 def await_approval(context: BrowserContext, args: argparse.Namespace) -> None:
-    """Wait until the signed-in Course Mapping Approval search form is present.
-
-    The form is polled every few seconds so a completed login proceeds on its own;
-    pressing Enter retries at once, opening the component when only the dashboard is up.
-    """
-    if args.skip_login:
-        ensure_approval(context, args.timeout_ms)
-        return
-    print(LOGIN_PROMPT, end="", flush=True)
-    while True:
-        if approval_ready(context):
-            print("\nCourse Mapping Approval detected.", flush=True)
-            return
-        if not wait_for_enter(POLL_SECONDS):
-            continue
-        try:
-            ensure_approval(context, args.timeout_ms)
-            return
-        except (RuntimeError, PlaywrightError) as error:
-            print(f"Not ready: {error_summary(error)}")
-            print("Browser remains open. Finish signing in; this continues when the form appears.")
-            print(LOGIN_PROMPT, end="", flush=True)
+    """Sign in and wait for the approval form."""
+    print(LOGIN_PROMPT, flush=True)
+    page = context.pages[0]
+    try:
+        sign_in(page, args.timeout_ms)
+    except PlaywrightError as error:
+        print(f"Automatic sign-in stopped: {error_summary(error)}")
+        print("Sign in and open Course Mapping Approval in VNC.", flush=True)
+    wait_for_approval(page, 0)
+    print("Course Mapping Approval detected.", flush=True)
 
 
 def manual_dialog(_: Dialog) -> None:
@@ -365,22 +338,18 @@ def manual_dialog(_: Dialog) -> None:
 
 
 def connect(context: BrowserContext, args: argparse.Namespace) -> None:
-    if not args.cdp_url:
-        page = context.pages[0] if context.pages else context.new_page()
-        try:
-            page.goto(COMPONENT, timeout=args.timeout_ms)
-        except PlaywrightError as error:
-            if args.skip_login:
-                raise
-            print(f"Initial navigation failed: {error_summary(error)}")
-            print("Browser remains open. Retry navigation in VNC before continuing.")
+    page = context.pages[0] if context.pages else context.new_page()
+    try:
+        page.goto(COMPONENT, timeout=args.timeout_ms)
+    except PlaywrightError as error:
+        print(f"Initial navigation failed: {error_summary(error)}")
+        print("Browser remains open. Retry navigation in VNC before continuing.")
     await_approval(context, args)
 
 
-def hold_open(args: argparse.Namespace, message: str) -> None:
-    if not args.skip_login and not args.cdp_url:
-        print(message)
-        input("Browser remains open for inspection. Press Enter to close: ")
+def hold_open(message: str) -> None:
+    print(message)
+    input("Browser remains open for inspection. Press Enter to close: ")
 
 
 def collect(
@@ -425,7 +394,7 @@ def run_export(context: BrowserContext, args: argparse.Namespace, requests: APIR
         finally:
             persist(result, args)
     except Exception as error:
-        hold_open(args, f"Collection stopped: {error}.")
+        hold_open(f"Collection stopped: {error}.")
         raise
 
 

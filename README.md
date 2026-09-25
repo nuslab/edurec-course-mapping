@@ -74,13 +74,11 @@ edurec-course-mapping fetch URL
 edurec-course-mapping render URL
 ```
 
-`--cdp-url` attaches `export` or `review` to a running, logged-in Chromium and
-leaves it open on exit; `--skip-login` skips the login prompt. See `--help` for the
-rest.
+See `--help` for the other options.
 
 ### export
 
-Waits for the approval form after login (Enter retries), searches, switches the
+Signs in through NUS SSO, waits for the approval form, searches, switches the
 grid to **View 100**, opens every matching request and adds the pseudonymized
 requests to the store. It prints the status (`complete`, `limit_reached`
 or `interrupted`) and the number of new versions. An interrupted export exits

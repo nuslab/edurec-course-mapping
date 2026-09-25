@@ -4,7 +4,7 @@ from dataclasses import replace
 from typing import TypedDict
 from unittest import mock
 
-from playwright.sync_api import Dialog, sync_playwright
+from playwright.sync_api import Dialog, Route, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
 from edurec_course_mapping import edurec
@@ -13,7 +13,6 @@ from edurec_course_mapping.edurec import (
     CANCEL,
     COMMENT_BOX,
     SKIPPED,
-    ApprovalNotLoadedError,
     EduRec,
     PanelSetup,
     ReviewPage,
@@ -26,8 +25,6 @@ from edurec_course_mapping.store import Version
 from tests.test_export import records
 from tests.test_parse import fixture, tag
 from tests.test_review import FALLBACK, PROGRESS, with_fallback
-
-NOT_LOADED = ApprovalNotLoadedError("Course Mapping Approval is not loaded.")
 
 
 class PanelState(TypedDict):
@@ -45,39 +42,69 @@ def button_for(verdict: Verdict) -> str:
     return next(button for button, value in BUTTONS.items() if value == verdict)
 
 
-class ApprovalTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.frame = self.patch("mapping_frame")
-        self.open_component = self.patch("open_component")
-        self.context = mock.MagicMock()
+class WaitForApprovalTests(unittest.TestCase):
+    def test_returns_when_the_form_attaches(self) -> None:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.set_content('<iframe name="TargetContent"></iframe>')
+            with self.assertRaises(PlaywrightError):
+                edurec.wait_for_approval(page, 100)
+            page.evaluate("""() => setTimeout(() => {
+                const body = document.querySelector('iframe').contentDocument.body;
+                body.innerHTML = '<form name="win0" id="N_EXSP_MOD_APPR"></form>';
+            }, 200)""")
+            edurec.wait_for_approval(page, 0)
+            browser.close()
 
-    def patch(self, name: str) -> mock.MagicMock:
-        patcher = mock.patch.object(edurec, name)
-        self.addCleanup(patcher.stop)
-        started: mock.MagicMock = patcher.start()
-        return started
 
-    def test_form_present_does_not_navigate(self) -> None:
-        edurec.ensure_approval(self.context, 60000)
-        self.open_component.assert_not_called()
+class SignInTests(unittest.TestCase):
+    HOME = "https://edurec.nus.edu.sg/psp/cs90prd/EMPLOYEE/SA/h/?tab=DEFAULT"
+    ACS = "https://edurec.nus.edu.sg/psp/cs90prd/?cmd=login&languageCd=ENG"
+    SLOGIN = "https://edurec.nus.edu.sg/cs90prd/?ncmd=slogin"
 
-    def test_opens_the_component_when_only_the_dashboard_is_up(self) -> None:
-        self.frame.side_effect = [NOT_LOADED, None]
-        edurec.ensure_approval(self.context, 60000)
-        self.open_component.assert_called_once_with(self.context, 60000)
-        self.assertEqual(self.frame.call_count, 2)
+    def run_sign_in(self, signed_in: bool) -> list[str]:
+        """Sign in against stubbed EduRec and Microsoft pages; returns the page URLs loaded."""
+        visited: list[str] = []
+        state = {"signed_in": signed_in}
 
-    def test_other_frame_errors_propagate(self) -> None:
-        self.frame.side_effect = RuntimeError("Found 2 Course Mapping Approval frames.")
-        with self.assertRaises(RuntimeError):
-            edurec.ensure_approval(self.context, 60000)
-        self.open_component.assert_not_called()
+        def redirect(url: str) -> str:
+            # Routes miss the request that follows an HTTP redirect, so redirect by script.
+            return f"<script>location.href = {url!r}</script>"
 
-    def test_ready_only_with_exactly_one_form(self) -> None:
-        self.assertTrue(edurec.approval_ready(self.context))
-        for error in (NOT_LOADED, RuntimeError("duplicates"), PlaywrightError("closed")):
-            self.frame.side_effect = error
-            self.assertFalse(edurec.approval_ready(self.context))
+        def handle(route: Route) -> None:
+            url = route.request.url
+            visited.append(url)
+            if url == edurec.COMPONENT and not state["signed_in"]:
+                body = '<div class="nus_sso_login"><a href="/cs90prd/?ncmd=slogin">here</a></div>'
+            elif url == self.SLOGIN:
+                body = redirect(edurec.SSO_HOST + "saml2")
+            elif url.startswith(edurec.SSO_HOST):
+                body = redirect(self.ACS)
+            elif url == self.ACS:
+                state["signed_in"] = True
+                body = redirect(self.HOME)
+            else:
+                body = "<p>page</p>"
+            route.fulfill(content_type="text/html", body=body)
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.route("**/*", handle)
+            page.goto(edurec.COMPONENT)
+            edurec.sign_in(page, 5000)
+            self.assertEqual(page.url, edurec.COMPONENT)
+            browser.close()
+        return visited
+
+    def test_follows_sso_then_reopens_the_component(self) -> None:
+        visited = self.run_sign_in(signed_in=False)
+        self.assertEqual(visited[-2:], [self.HOME, edurec.COMPONENT])
+        self.assertIn(self.SLOGIN, visited)
+
+    def test_signed_in_page_is_left_alone(self) -> None:
+        self.assertEqual(self.run_sign_in(signed_in=True), [edurec.COMPONENT])
 
 
 class EduRecTests(unittest.TestCase):

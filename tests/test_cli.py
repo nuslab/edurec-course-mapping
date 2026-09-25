@@ -16,13 +16,9 @@ from edurec_course_mapping.edurec import COMPONENT
 from edurec_course_mapping.models import ExportResult, LinkedDocument, Request
 from tests.test_export import records
 
-DUPLICATES = RuntimeError("Found 2 Course Mapping Approval frames.")
-
 
 def namespace(**overrides: object) -> argparse.Namespace:
     values: dict[str, object] = {
-        "skip_login": False,
-        "cdp_url": None,
         "timeout": 60,
         "timeout_ms": 60000,
         "command": "export",
@@ -49,52 +45,27 @@ def quietly(function: Callable[..., object], *args: object) -> str:
 
 class AwaitApprovalTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.ensure_approval = self.patch("ensure_approval")
-        self.approval_ready = self.patch("approval_ready", return_value=False)
+        self.sign_in = self.patch("sign_in")
+        self.wait_for_approval = self.patch("wait_for_approval")
         self.context = mock.MagicMock()
-        self.wait_for_enter = self.patch("wait_for_enter", return_value=True)
 
-    def patch(self, name: str, return_value: object = mock.DEFAULT) -> mock.MagicMock:
-        patcher = mock.patch.object(cli, name, return_value=return_value)
+    def patch(self, name: str) -> mock.MagicMock:
+        patcher = mock.patch.object(cli, name)
         self.addCleanup(patcher.stop)
         started: mock.MagicMock = patcher.start()
         return started
 
-    def test_skip_login_requires_the_form_at_once(self) -> None:
-        cli.await_approval(self.context, namespace(skip_login=True))
-        self.ensure_approval.assert_called_once_with(self.context, 60000)
-        self.approval_ready.assert_not_called()
-        self.ensure_approval.side_effect = DUPLICATES
-        with self.assertRaises(RuntimeError):
-            cli.await_approval(self.context, namespace(skip_login=True))
-
-    def test_detected_login_proceeds_without_enter(self) -> None:
-        self.approval_ready.return_value = True
+    def test_login_signs_in_then_waits_without_a_timeout(self) -> None:
         out = quietly(cli.await_approval, self.context, namespace())
-        self.assertIn("Course Mapping Approval detected", out)
-        self.wait_for_enter.assert_not_called()
-
-    def test_polls_until_enter_then_requires_the_form(self) -> None:
-        self.wait_for_enter.side_effect = [False, True]
-        quietly(cli.await_approval, self.context, namespace())
-        self.ensure_approval.assert_called_once_with(self.context, 60000)
-
-    def test_failed_retry_keeps_waiting(self) -> None:
-        self.approval_ready.side_effect = [False, True]
-        self.ensure_approval.side_effect = DUPLICATES
-        out = quietly(cli.await_approval, self.context, namespace())
-        self.assertIn("Not ready: Found 2 Course Mapping Approval frames.", out)
+        self.sign_in.assert_called_once_with(self.context.pages[0], 60000)
+        self.wait_for_approval.assert_called_once_with(self.context.pages[0], 0)
         self.assertIn("Course Mapping Approval detected", out)
 
-    def test_navigation_error_on_retry_keeps_waiting(self) -> None:
-        for error, shown in [
-            (PlaywrightError("Timeout 60000ms exceeded.\ndetail"), "Timeout 60000ms exceeded.\n"),
-            (RuntimeError(""), "RuntimeError\n"),
-        ]:
-            self.approval_ready.side_effect = [False, True]
-            self.ensure_approval.side_effect = error
-            out = quietly(cli.await_approval, self.context, namespace())
-            self.assertIn(f"Not ready: {shown}", out)
+    def test_failed_sign_in_is_left_to_the_user(self) -> None:
+        self.sign_in.side_effect = PlaywrightError("Timeout 60000ms exceeded.\ndetail")
+        out = quietly(cli.await_approval, self.context, namespace())
+        self.assertIn("Automatic sign-in stopped: Timeout 60000ms exceeded.\n", out)
+        self.wait_for_approval.assert_called_once_with(self.context.pages[0], 0)
 
 
 class ConnectTests(unittest.TestCase):
@@ -105,23 +76,15 @@ class ConnectTests(unittest.TestCase):
         self.context = mock.MagicMock()
         self.page = self.context.pages[0]
 
-    def test_attached_browser_is_not_navigated(self) -> None:
-        args = namespace(cdp_url="http://localhost:9222")
-        cli.connect(self.context, args)
-        self.page.goto.assert_not_called()
-        self.await_approval.assert_called_once_with(self.context, args)
-
     def test_launched_browser_opens_the_component(self) -> None:
         cli.connect(self.context, namespace())
         self.page.goto.assert_called_once_with(COMPONENT, timeout=60000)
 
-    def test_navigation_failure_is_left_to_the_user_unless_ready(self) -> None:
+    def test_navigation_failure_is_left_to_the_user(self) -> None:
         self.page.goto.side_effect = PlaywrightError("net::ERR_PROXY\nstack")
         out = quietly(cli.connect, self.context, namespace())
         self.assertIn("Initial navigation failed: net::ERR_PROXY\n", out)
         self.await_approval.assert_called_once()
-        with self.assertRaises(PlaywrightError):
-            cli.connect(self.context, namespace(skip_login=True))
 
 
 def collected(count: int = 2) -> list[Request]:
@@ -210,9 +173,7 @@ class RunTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
             cli.run_export(self.context, namespace(), self.requests)
         self.assertEqual(len(self.save.call_args.args[0]), 1)
-        self.mocks["hold_open"].assert_called_once_with(
-            mock.ANY, "Collection stopped: lost session."
-        )
+        self.mocks["hold_open"].assert_called_once_with("Collection stopped: lost session.")
         self.assert_dialog_hook_removed()
         # With --documents a request is only complete once its documents are known.
         with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
