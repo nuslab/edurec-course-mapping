@@ -18,13 +18,13 @@ from edurec_course_mapping.edurec import (
     ReviewPage,
     stack,
 )
-from edurec_course_mapping.models import PENDING_APPROVAL, Clicked, Skipped, Verdict
+from edurec_course_mapping.models import PENDING_APPROVAL, Clicked, Outcome, Skipped, Verdict
 from edurec_course_mapping.parse import DETAIL
 from edurec_course_mapping.review import VERDICT_LABELS, QueueItem, panel_html, panel_setup
 from edurec_course_mapping.store import Version
 from tests.test_export import records
 from tests.test_parse import fixture, tag
-from tests.test_review import FALLBACK, PROGRESS, with_fallback
+from tests.test_review import FALLBACK, PROGRESS, STARTED, with_fallback
 
 
 class PanelState(TypedDict):
@@ -36,6 +36,7 @@ class PanelState(TypedDict):
     reason: str
     scrollTop: int
     outlined: dict[str, str]
+    warned: bool
 
 
 def button_for(verdict: Verdict) -> str:
@@ -249,8 +250,13 @@ class ReviewPageTests(unittest.TestCase):
         _, request = records()[0]
         # Enough overlap lines to make the panel body scroll in a 720px-high viewport.
         advice = replace(with_fallback(request), overlap_topics=[f"Topic {n}" for n in range(80)])
+        # The sibling matches the fallback.
+        request = replace(request, sibling_request_ids=["sibling"])
+        outcome = Outcome(
+            verdict="request_remapping", comment="x", verified=True, recorded_at=STARTED
+        )
         item = QueueItem(advice, request, Version(request, "hash"))
-        panel = panel_html(item, PROGRESS, {}, dry_run=False)
+        panel = panel_html(item, PROGRESS, {"sibling": outcome}, dry_run=False)
         approve, reject = button_for("approve"), button_for("reject")
         remap = button_for("request_remapping")
         recommended = stack(advice.comment, "prior")
@@ -307,6 +313,7 @@ class ReviewPageTests(unittest.TestCase):
                     scrollTop: {in_panel("#body")}.scrollTop,
                     outlined: Object.fromEntries('{",".join(BUTTONS)}'.split(',').map(
                         id => [id, document.getElementById(id).style.outline])),
+                    warned: !{in_panel(".warn[data-verdict]")}.hidden,
                 }})""")
                 return state
 
@@ -342,6 +349,7 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(panel_state()["modified"], [])
             markers = {"recommended": [["Selected", True]], "fallback": [["Select", False]]}
             self.assertEqual(panel_state()["markers"], markers)
+            self.assertTrue(panel_state()["warned"])
 
             # Modified marker and Reset.
             set_box("typed")
@@ -367,6 +375,7 @@ class ReviewPageTests(unittest.TestCase):
             self.assertEqual(box.input_value(), fallback)
             self.assertEqual(panel_state()["selected"], "fallback")
             self.assertEqual(panel_state()["pill"], "Request Remapping", "pill follows selection")
+            self.assertFalse(panel_state()["warned"])
             self.assertEqual(outlined(), {remap})
             self.assertIn("rgb(239, 108, 0)", panel_state()["outlined"][remap])
             self.assertEqual(

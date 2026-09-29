@@ -87,6 +87,7 @@
                 el.disabled = el.closest('.pane').dataset.tab === tab;
                 el.textContent = el.disabled ? 'Selected' : 'Select';
             }
+            for (const el of $$('.warn[data-verdict]')) el.hidden = el.dataset.verdict === verdicts[tab];
             for (const [id, verdict] of Object.entries(buttons)) {
                 const button = document.getElementById(id);
                 const active = verdict === verdicts[tab];

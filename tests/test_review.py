@@ -330,6 +330,10 @@ class PanelTests(unittest.TestCase):
                 "Planning is missing. Consider remapping to CS5242.",
                 "Reset comment",
                 '<button type="button" class="select">Select</button>',
+                "Siblings",
+                '<span class="sibling">CS 2 (PU) -&gt; CS3243</span>',
+                f'class="pill" style="background:{RED}">Reject<',
+                "Different verdict",  # warning badge on the sibling entry only
                 "Previous comments",
                 "kept &lt;below&gt;",
                 "Remap",
@@ -343,15 +347,18 @@ class PanelTests(unittest.TestCase):
                 "Planning",
                 "Extra in partner course",
                 "Robotics",
-                "Siblings",
-                "CS 2 (PU) -&gt; CS3243: Reject",
-                "different verdict",  # warning badge on the sibling entry only
                 'id="reason"',
                 'id="skip"',
             )
             self.assertEqual(html.count("pill active"), 1, "one verdict pill, in the header only")
             self.assertEqual(html.count('class="pill" data-tab'), 1)
-            self.assertEqual(html.count("different verdict"), 1)
+            self.assertEqual(html.count("Different verdict"), 1)
+            self.assertIn('<span class="warn" data-verdict="reject">Different verdict', html)
+            outcomes[sibling] = replace(outcomes[sibling], verdict="approve")
+            self.assertIn(
+                '<span class="warn" data-verdict="approve" hidden>Different verdict',
+                panel_html(item, PROGRESS, outcomes, dry_run=True, courses=courses),
+            )
             self.assertEqual(html.count("Target:"), 1)
             self.assertEqual(html.count("Better fit"), 1)
             self.assertEqual(html.count('class="select"'), 2)
@@ -400,8 +407,12 @@ class PanelTests(unittest.TestCase):
             self.assertIn("No fallback", panel_html(item, PROGRESS, {}, dry_run=False))
             self.assertIn("Previous comments", panel_html(item, PROGRESS, {}, False, existing="x"))
             self.assertNotIn("Previous comments", html)
-            self.assertIn(f"{versions[1].request_id}: not yet submitted", html)
-            self.assertNotIn("different verdict", html)
+            self.assertIn(
+                f'<span class="sibling">{versions[1].request_id}</span>'
+                '<span class="pending">Not yet submitted</span>',
+                html,
+            )
+            self.assertNotIn("Different verdict", html)
 
     def test_header_badges_colour_confidence_and_overlap(self) -> None:
         _, request = records()[0]

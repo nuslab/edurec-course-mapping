@@ -14,7 +14,8 @@ ul{margin:0;padding-left:18px}
 .bar{height:3px;margin:4px 0 2px;border-radius:2px;background:#ddd}
 .bar span{display:block;height:100%;border-radius:2px;background:#555}
 .progress{display:flex;justify-content:space-between;gap:6px;font-size:11px;color:#444}
-.warn{padding:1px 6px;border-radius:3px;background:#ffe082;color:#222}
+.warn,.pending{padding:1px 6px;border-radius:3px}
+.warn{background:#ffe082;color:#222}
 .label{margin:12px 0 2px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#444}
 .comment{white-space:pre-wrap;background:#f4f4f4;padding:4px}
 .tabs{display:flex;gap:2px;margin-top:12px}
@@ -30,3 +31,9 @@ background:#fff}
 .modified{color:#b26a00;font-weight:bold;margin-left:6px}
 button{padding:4px 10px;font:inherit;cursor:pointer}
 #reason{flex:1;font:inherit;padding:4px}
+.siblings{list-style:none;padding:0;display:flex;flex-direction:column;gap:4px}
+.siblings li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;padding:5px 8px;
+border:1px solid #bbb;border-radius:4px;background:#fff}
+.sibling{flex:1 0 100%;font-size:12px}
+.siblings .pill{font-size:12px}
+.pending{background:#ddd;color:#444;font-size:12px}

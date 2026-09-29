@@ -4,7 +4,7 @@
 {%- macro pill(text, colour, tab=none, active=true) -%}
 <span class="pill{% if tab and active %} active{% endif %}"{% if tab %} data-tab="{{ tab }}"{% endif %} style="background:{{ colour }}">{{ text }}</span>
 {%- endmacro -%}
-{%- macro warn(text) %}<span class="warn">{{ text }}</span>{% endmacro -%}
+{%- macro warn(text, verdict=none, hidden=false) %}<span class="warn"{% if verdict %} data-verdict="{{ verdict }}"{% endif %}{% if hidden %} hidden{% endif %}>{{ text }}</span>{% endmacro -%}
 {%- macro label(text) %}<div class="label">{{ text }}</div>{% endmacro -%}
 {%- macro bullets(title, values) -%}
 {%- if values %}
@@ -60,6 +60,18 @@
 {%- set fallback = proposal.fallback %}
 {{ pane("fallback", verdict_labels[fallback.verdict] if fallback else none,
         fallback.comment if fallback else "", proposal.fallback_rationale or "") }}
+{#- Next to the decision so a split verdict is seen; `page.js` updates the warnings. -#}
+{%- if request.sibling_request_ids %}
+{{ label("Siblings (many-to-one)") }}
+<ul class="siblings">
+{%- for sibling in request.sibling_request_ids %}
+{%- set logged = latest.get(sibling) %}
+<li><span class="sibling">{{ courses.get(sibling, sibling) }}</span>
+{%- if logged %}{{ pill(verdict_labels[logged.verdict], verdict_colours[logged.verdict]) }}{{ warn("Different verdict", logged.verdict, hidden=logged.verdict == proposal.verdict) }}
+{%- else %}<span class="pending">Not yet submitted</span>{% endif %}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
 {%- if existing %}
 {{ label("Previous comments") }}
 <div class="comment">{{ existing }}</div>
@@ -75,15 +87,5 @@
 {{- bullets("Overlap", proposal.overlap_topics) }}
 {{- bullets("Missing from partner course", proposal.missing_from_partner) }}
 {{- bullets("Extra in partner course", proposal.extra_in_partner) }}
-{%- if request.sibling_request_ids %}
-{{ label("Siblings (many-to-one)") }}
-<ul>
-{%- for sibling in request.sibling_request_ids %}
-{%- set logged = latest.get(sibling) %}
-<li>{{ courses.get(sibling, sibling) }}: {{ verdict_labels[logged.verdict] if logged else "not yet submitted" }}
-{%- if logged and logged.verdict != proposal.verdict %} {{ warn("different verdict") }}{% endif %}</li>
-{%- endfor %}
-</ul>
-{%- endif %}
 </div>
 <footer><input type="text" id="reason" placeholder="Skip reason (optional)"><button type="button" id="skip">Skip this request</button></footer>
