@@ -232,8 +232,17 @@ class EduRec:
         if operator == "between":
             self.control(field + "$to").fill(str(high))
 
+    def reload(self) -> None:
+        """Reopen the component, discarding the state its server session keeps."""
+        page = self.frame().page
+        page.goto(COMPONENT, timeout=self.timeout_ms)
+        wait_for_approval(page, self.timeout_ms)
+
     def search(self, partition: Partition) -> Listing:
-        # Opening a detail repopulates the criteria; clear those this search leaves blank.
+        # After a detail has been opened, the server reads a `between` range from its
+        # upper bound with no end, whatever the form posts; a reloaded component does not.
+        self.reload()
+        # Clear the criteria this search leaves blank.
         for field in FIELDS:
             if field in RANGE_FIELDS:
                 continue

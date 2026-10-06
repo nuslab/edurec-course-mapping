@@ -18,7 +18,14 @@ from edurec_course_mapping.edurec import (
     ReviewPage,
     stack,
 )
-from edurec_course_mapping.models import PENDING_APPROVAL, Clicked, Outcome, Skipped, Verdict
+from edurec_course_mapping.models import (
+    PENDING_APPROVAL,
+    Clicked,
+    Outcome,
+    Partition,
+    Skipped,
+    Verdict,
+)
 from edurec_course_mapping.parse import DETAIL
 from edurec_course_mapping.review import VERDICT_LABELS, QueueItem, panel_html, panel_setup
 from edurec_course_mapping.store import Version
@@ -157,6 +164,23 @@ class EduRecTests(unittest.TestCase):
             self.assertEqual(transitions, [("N_EXSP_MOD_VW2_EMPLID$op", None)])
             self.assertEqual(site.control("EMPLID").input_value(), "A0000500X")
             browser.close()
+
+    def test_search_reloads_the_component_before_setting_criteria(self) -> None:
+        site = EduRec(mock.Mock())
+        calls = mock.Mock()
+        control = mock.Mock()
+        control.evaluate.return_value = "INPUT"
+        control.get_attribute.return_value = "3"
+        with (
+            mock.patch.object(site, "reload", calls.reload),
+            mock.patch.object(site, "criterion", calls.criterion),
+            mock.patch.object(site, "control", return_value=control),
+            mock.patch.object(site, "transition"),
+            mock.patch.object(site, "read_list"),
+        ):
+            site.search(Partition(term_low=2620, term_high=2620, student_low="A", student_high="B"))
+        self.assertEqual(calls.mock_calls[0], mock.call.reload())
+        self.assertIn(mock.call.criterion("EMPLID", "A", "B"), calls.mock_calls)
 
     def test_search_switches_grid_to_view_100(self) -> None:
         listing = fixture("main.html")
