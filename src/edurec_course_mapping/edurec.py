@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import BrowserContext, Frame, Locator, Page, Response
+from playwright.sync_api import Error as PlaywrightError
 
 from .models import (
     PENDING_APPROVAL,
@@ -41,6 +42,8 @@ SEARCH = "PTS_CFG_CL_WRK_PTS_SRCH_BTN"
 COMPONENT = (
     "https://edurec.nus.edu.sg/psp/cs90prd/EMPLOYEE/SA/c/N_STUDENT_RECORDS.N_EXSP_MOD_APPR.GBL"
 )
+EXPIRED = "cmd=expire"
+"""The portal's query once EduRec has ended the sign-in session."""
 SSO_LINK = '.nus_sso_login a[href$="?ncmd=slogin"]'
 SSO_HOST = "https://login.microsoftonline.com/"
 TARGET_FRAME = 'iframe[name="TargetContent"]'
@@ -135,6 +138,21 @@ def wait_for_approval(page: Page, timeout_ms: float) -> None:
     page.frame_locator(TARGET_FRAME).locator(APPROVAL_FORM).wait_for(
         state="attached", timeout=timeout_ms
     )
+
+
+def session_expired(context: BrowserContext, timeout_ms: float = 5_000) -> bool:
+    """Whether EduRec ended the sign-in session, moving the portal to its expiry page.
+
+    The content frame detaches just before the page arrives there, so an action that
+    failed on that frame waits briefly for the page to follow.
+    """
+    if not context.pages:
+        return False
+    try:
+        context.pages[0].wait_for_url(lambda url: EXPIRED in url, timeout=timeout_ms)
+    except PlaywrightError:
+        return False
+    return True
 
 
 def sign_in(page: Page, timeout_ms: float) -> None:

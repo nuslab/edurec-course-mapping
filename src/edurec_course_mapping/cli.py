@@ -44,6 +44,7 @@ from .edurec import (
     COMPONENT,
     EduRec,
     ReviewPage,
+    session_expired,
     sign_in,
     wait_for_approval,
 )
@@ -57,6 +58,7 @@ LOGIN_PROMPT = (
     "Complete any SSO prompts in the browser."
 )
 DOWNLOAD_TABLES = ("downloads", "downloads_url_chains", "downloads_slices")
+SESSION_EXPIRED = "EduRec session expired"
 REVIEW_NOTICE = (
     "Only clicks made while this program shows its panel are logged; "
     "do not act in EduRec after it stops."
@@ -394,7 +396,10 @@ def run_export(context: BrowserContext, args: argparse.Namespace, requests: APIR
         finally:
             persist(result, args)
     except Exception as error:
-        hold_open(f"Collection stopped: {error}.")
+        expired = session_expired(context)
+        hold_open(f"Collection stopped: {SESSION_EXPIRED if expired else error}.")
+        if expired:
+            sys.exit(1)
         raise
 
 
@@ -413,7 +418,11 @@ def run_review(context: BrowserContext, args: argparse.Namespace) -> None:
             dry_run=args.dry_run,
         )
     except Exception as error:
-        print(f"Review stopped: {error}. Stored outcomes retained.", flush=True)
+        expired = session_expired(context)
+        reason = SESSION_EXPIRED if expired else error
+        print(f"Review stopped: {reason}. Stored outcomes retained.", flush=True)
+        if expired:
+            sys.exit(1)
         raise
     finally:
         context.remove_listener("dialog", manual_dialog)

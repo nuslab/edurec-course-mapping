@@ -105,10 +105,12 @@ class RunTests(unittest.TestCase):
             "ReviewPage",
             "review",
             "hold_open",
+            "session_expired",
         ):
             patcher = mock.patch.object(cli, name)
             self.mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
+        self.mocks["session_expired"].return_value = False
 
         def export(site: object, data: ExportResult, **_: object) -> None:
             data.requests.extend(collected())
@@ -196,6 +198,21 @@ class RunTests(unittest.TestCase):
             cli.run_review(self.context, args)
         self.assertIn("Review stopped: boom. Stored outcomes retained.", out.getvalue())
         self.mocks["hold_open"].assert_not_called()
+
+    def test_an_expired_session_is_reported_without_the_error(self) -> None:
+        self.mocks["session_expired"].return_value = True
+        self.mocks["review"].side_effect = RuntimeError("Frame was detached")
+        with redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            cli.run_review(self.context, namespace())
+        self.assertIn(
+            "Review stopped: EduRec session expired. Stored outcomes retained.", out.getvalue()
+        )
+        self.mocks["export"].side_effect = RuntimeError("Frame was detached")
+        with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            cli.run_export(self.context, namespace(), self.requests)
+        self.mocks["hold_open"].assert_called_once_with(
+            "Collection stopped: EduRec session expired."
+        )
 
 
 class ParseArgsTests(unittest.TestCase):

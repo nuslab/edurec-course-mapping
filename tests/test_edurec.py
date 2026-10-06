@@ -66,6 +66,23 @@ class WaitForApprovalTests(unittest.TestCase):
             browser.close()
 
 
+class SessionExpiredTests(unittest.TestCase):
+    def test_detects_the_expiry_page(self) -> None:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            context = browser.new_context()
+            self.assertFalse(edurec.session_expired(context))
+            page = context.new_page()
+            page.route("**/*", lambda route: route.fulfill(body="", content_type="text/html"))
+            page.goto("https://edurec.test/psc/component")
+            self.assertFalse(edurec.session_expired(context, 100))
+            page.evaluate("""() => setTimeout(() => {
+                location.href = 'https://edurec.test/psp/cs90prd/EMPLOYEE/SA/?cmd=expire';
+            }, 200)""")
+            self.assertTrue(edurec.session_expired(context))
+            browser.close()
+
+
 class SignInTests(unittest.TestCase):
     HOME = "https://edurec.nus.edu.sg/psp/cs90prd/EMPLOYEE/SA/h/?tab=DEFAULT"
     ACS = "https://edurec.nus.edu.sg/psp/cs90prd/?cmd=login&languageCd=ENG"
